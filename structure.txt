@@ -1,0 +1,150 @@
+.
+├── .DS_Store
+├── .env
+├── .gitignore
+├── alembic
+│   ├── env.py
+│   ├── README
+│   ├── script.py.mako
+│   └── versions
+│       ├── 06c57be65746_product_fix_models.py
+│       ├── 1f591f7a4ac7_banners_promo_models.py
+│       ├── 24462822979b_categorie_image.py
+│       ├── 24e2fa10e739_add_brend_and_catalog_table.py
+│       ├── 2e07d59e53c6_product_table.py
+│       ├── 36e79a9ecfe4_category_fix_models.py
+│       ├── 3d5e82b4c355_product_fix_models.py
+│       ├── 43a9080c6764_product_table.py
+│       ├── 48591978fe3c_initial_models.py
+│       ├── 4ddf1214cf9c_video_add.py
+│       ├── 6592dfcb0f85_video_table.py
+│       ├── 663ce9cdf957_new_models.py
+│       ├── 6f9e946a9a5e_add_video_models.py
+│       ├── 7010870f7b79_video_table.py
+│       ├── 73f65904da08_product_add_discount.py
+│       ├── 748184b27c4c_rank_table.py
+│       ├── 78018f91777c_add_brend_and_catalog_table.py
+│       ├── 7939ec847f5b_video_add.py
+│       ├── 89b8e2ec0cfe_product_add_discount.py
+│       ├── 9b60e6d9934a_product_fix_models.py
+│       ├── 9c849f61221d_video_add.py
+│       ├── a276f3f51e01_banners_promo_models.py
+│       ├── a626a67d512f_banners_promo_models.py
+│       ├── b512bdd85003_product_table.py
+│       ├── bb54689b1f10_video_add.py
+│       ├── bbfbea63e156_product_add_brand.py
+│       ├── c1cdd5e0bcf9_add_product_count_to_categories.py
+│       ├── c9318b4f1aef_product_add_discount.py
+│       ├── d323665dbece_product_table.py
+│       ├── d7234108921e_rank_table.py
+│       ├── d757a0b3ce21_product_fix_models.py
+│       ├── d79f0efa866a_add_brend_and_catalog_table.py
+│       ├── e89c62d6d915_add_video_models.py
+│       ├── e8db9a2649e0_categorie_image.py
+│       ├── ef7e54dd6362_video_add.py
+│       ├── fa55086ad251_product_table.py
+│       └── fcf46aaa1e14_banners_promo_models.py
+├── alembic.ini
+├── app
+│   ├── api
+│   │   └── v1
+│   │       ├── brand.py
+│   │       ├── catalogs.py
+│   │       ├── categories.py
+│   │       ├── import_logs.py
+│   │       ├── manufacturers.py
+│   │       ├── products.py
+│   │       ├── scraper.py
+│   │       └── video.py
+│   ├── core
+│   │   ├── celery_config.py
+│   │   ├── config.py
+│   │   └── database.py
+│   ├── crud
+│   │   ├── brand.py
+│   │   ├── catalog.py
+│   │   ├── category.py
+│   │   ├── color.py
+│   │   ├── import_log.py
+│   │   ├── material.py
+│   │   ├── product_relations.py
+│   │   ├── product.py
+│   │   ├── review.py
+│   │   └── video.py
+│   ├── data
+│   │   └── categories_data.py
+│   ├── deps.py
+│   ├── main.py
+│   ├── models
+│   │   ├── __init__.py
+│   │   ├── attributes.py
+│   │   ├── banner.py
+│   │   ├── brand.py
+│   │   ├── catalog_image.py
+│   │   ├── catalog.py
+│   │   ├── category.py
+│   │   ├── color.py
+│   │   ├── import_log.py
+│   │   ├── product_image.py
+│   │   ├── product_ranking.py
+│   │   ├── product.py
+│   │   ├── promotion.py
+│   │   ├── review.py
+│   │   └── video.py
+│   ├── schemas
+│   │   ├── banner.py
+│   │   ├── brand.py
+│   │   ├── catalog_image.py
+│   │   ├── catalog.py
+│   │   ├── category.py
+│   │   ├── color.py
+│   │   ├── import_log.py
+│   │   ├── material.py
+│   │   ├── product_image.py
+│   │   ├── product.py
+│   │   ├── promotion.py
+│   │   ├── review.py
+│   │   └── video.py
+│   ├── scrapers
+│   │   ├── __init__.py
+│   │   ├── as_doors.py
+│   │   ├── base_scraper.py
+│   │   ├── intecron.py
+│   │   ├── labirint.py
+│   │   └── scraper_runner.py
+│   ├── services
+│   │   ├── csv_import.py
+│   │   └── product_ranking_service.py
+│   ├── utils
+│   │   └── text_utils.py
+│   └── worker
+│       ├── celery_app.py
+│       └── tasks.py
+├── debug_script.py
+├── docker-compose.yml
+├── Dockerfile
+├── media
+│   ├── categories
+│   │   ├── all2.png
+│   │   ├── bel.png
+│   │   ├── black.png
+│   │   ├── dom.png
+│   │   ├── electro.png
+│   │   ├── hit.png
+│   │   ├── kvart.png
+│   │   ├── loft.png
+│   │   ├── new.png
+│   │   ├── shum.png
+│   │   ├── steklo.png
+│   │   ├── venge.png
+│   │   └── zer.png
+│   └── videos
+│       ├── 2025-05-03 15.34.09.mp4
+│       ├── IMG_6995 2.MOV
+│       ├── IMG_6995.MOV
+│       └── IMG_7027.MOV
+├── poetry.lock
+├── pyproject.toml
+└── structure.txt
+
+18 directories, 130 files

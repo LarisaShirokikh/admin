@@ -25,7 +25,6 @@ venv/
 env/
 ENV/
 .venv/
-.env
 
 # Environment variables
 .env
@@ -33,32 +32,33 @@ ENV/
 .env.production
 .env.staging
 
+# Media/Upload files
+media/
+uploads/
+static/
+
+# OS
+.DS_Store
+Thumbs.db
+
 # IDE
 .vscode/
 .idea/
 *.swp
 *.swo
 
-# OS
-.DS_Store
-Thumbs.db
-
-# Database
-*.db
-*.sqlite3
-
 # Logs
 *.log
 logs/
 
-# Media files (if uploads)
-media/
-uploads/
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
 
-# Static files (if collected)
-staticfiles/
-static/
+# Poetry
+poetry.lock 
 
-# Django specific (if Django)
-*/migrations/*.py
-!*/migrations/__init__.py
+# Database
+*.db
+*.sqlite3
