@@ -4,14 +4,12 @@ from pydantic import BaseModel
 
 class CategoryBase(BaseModel):
     name: str
-    manufacturer_id: int
     image_url: Optional[str] = None
     description: Optional[str] = None
     is_active: bool = True
     meta_title: Optional[str] = None
     meta_description: Optional[str] = None
     meta_keywords: Optional[str] = None
-    parent_id: Optional[int] = None
 
 class CategoryCreate(CategoryBase):
     slug: Optional[str] = None
@@ -19,7 +17,6 @@ class CategoryCreate(CategoryBase):
 class CategoryUpdate(BaseModel):
     name: Optional[str] = None
     slug: Optional[str] = None
-    manufacturer_id: Optional[int] = None
     image_url: Optional[str] = None
     description: Optional[str] = None
     is_active: Optional[bool] = None

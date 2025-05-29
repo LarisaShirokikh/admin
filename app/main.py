@@ -9,7 +9,11 @@ from app.api.v1.scraper import router as scraper_router
 from app.api.v1.video import router as video_router
 from app.api.v1.brand import router as brand_router
 
-app = FastAPI()
+app = FastAPI(
+    title="Doors Admin API",
+    description="API для управления каталогом дверей",
+    version="1.0.0"
+)
 
 app.include_router(products_router, prefix="/api/v1/products", tags=["Products"])
 app.include_router(categories_router, prefix="/api/v1/categories", tags=["Categories"])

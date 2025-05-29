@@ -1,6 +1,8 @@
 .
-├── .DS_Store
 ├── .env
+├── .github
+│   └── workflows
+│       └── deploy.yml
 ├── .gitignore
 ├── alembic
 │   ├── env.py
@@ -120,31 +122,92 @@
 │   └── worker
 │       ├── celery_app.py
 │       └── tasks.py
+├── core
+│   ├── celery_config.py
+│   ├── config.py
+│   └── database.py
+├── crud
+│   ├── brand.py
+│   ├── catalog.py
+│   ├── category.py
+│   ├── color.py
+│   ├── import_log.py
+│   ├── material.py
+│   ├── product_relations.py
+│   ├── product.py
+│   ├── review.py
+│   └── video.py
+├── data
+│   └── categories_data.py
 ├── debug_script.py
+├── deps.py
 ├── docker-compose.yml
 ├── Dockerfile
+├── main.py
 ├── media
-│   ├── categories
-│   │   ├── all2.png
-│   │   ├── bel.png
-│   │   ├── black.png
-│   │   ├── dom.png
-│   │   ├── electro.png
-│   │   ├── hit.png
-│   │   ├── kvart.png
-│   │   ├── loft.png
-│   │   ├── new.png
-│   │   ├── shum.png
-│   │   ├── steklo.png
-│   │   ├── venge.png
-│   │   └── zer.png
-│   └── videos
-│       ├── 2025-05-03 15.34.09.mp4
-│       ├── IMG_6995 2.MOV
-│       ├── IMG_6995.MOV
-│       └── IMG_7027.MOV
+│   └── categories
+│       ├── all2.png
+│       ├── bel.png
+│       ├── black.png
+│       ├── dom.png
+│       ├── electro.png
+│       ├── hit.png
+│       ├── kvart.png
+│       ├── loft.png
+│       ├── new.png
+│       ├── shum.png
+│       ├── steklo.png
+│       ├── venge.png
+│       └── zer.png
+├── models
+│   ├── __init__.py
+│   ├── attributes.py
+│   ├── banner.py
+│   ├── brand.py
+│   ├── catalog_image.py
+│   ├── catalog.py
+│   ├── category.py
+│   ├── color.py
+│   ├── import_log.py
+│   ├── product_image.py
+│   ├── product_ranking.py
+│   ├── product.py
+│   ├── promotion.py
+│   ├── review.py
+│   └── video.py
 ├── poetry.lock
 ├── pyproject.toml
-└── structure.txt
+├── schemas
+│   ├── banner.py
+│   ├── brand.py
+│   ├── catalog_image.py
+│   ├── catalog.py
+│   ├── category.py
+│   ├── color.py
+│   ├── import_log.py
+│   ├── material.py
+│   ├── product_image.py
+│   ├── product.py
+│   ├── promotion.py
+│   ├── review.py
+│   └── video.py
+├── scrapers
+│   ├── __init__.py
+│   ├── as_doors.py
+│   ├── base_scraper.py
+│   ├── intecron.py
+│   ├── labirint.py
+│   └── scraper_runner.py
+├── services
+│   ├── csv_import.py
+│   └── product_ranking_service.py
+├── structure.txt
+├── utils
+│   └── text_utils.py
+├── worker
+│   ├── celery_app.py
+│   └── tasks.py
+└── workflows
+    └── deploy.yml
 
-18 directories, 130 files
+29 directories, 182 files

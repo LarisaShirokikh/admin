@@ -19,7 +19,6 @@ class Brand(Base):
 
     # Связь с продуктами
     products = relationship("Product", back_populates="brand")
-    categories = relationship("Category", back_populates="brand")
     catalogs = relationship("Catalog", back_populates="brand")
 
     def __repr__(self):

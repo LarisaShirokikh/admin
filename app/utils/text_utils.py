@@ -58,6 +58,50 @@ def generate_slug(text: str) -> str:
     
     return slug
 
+def generate_seo_meta(name: str) -> dict:
+    """Автоматическая генерация SEO мета-тегов"""
+    
+    # Определяем тип товара для более точных мета-тегов
+    name_lower = name.lower()
+    
+    # Ключевые слова в зависимости от категории
+    keywords_map = {
+        'двер': ['двери', 'дверь', 'входные', 'металлические'],
+        'фурнитур': ['фурнитура', 'ручки', 'замки', 'петли', 'аксессуары'],
+        'стекл': ['стекло', 'витражи', 'зеркала', 'стеклянные'],
+    }
+    
+    # Найдем подходящие ключевые слова
+    category_keywords = []
+    for key, words in keywords_map.items():
+        if key in name_lower:
+            category_keywords.extend(words)
+            break
+    
+    # Если не нашли специфичные, используем общие
+    if not category_keywords:
+        category_keywords = ['товары', 'продукция', 'каталог']
+    
+    # Генерируем мета-теги
+    meta_title = f"{name} - купить в интернет-магазине | Лучшие цены"
+    
+    meta_description = f"Купить {name.lower()} в нашем интернет-магазине. " \
+                      f"Широкий выбор, лучшие цены, быстрая доставка. " \
+                      f"Гарантия качества на все товары категории {name}."
+    
+    # Ограничиваем длину описания (для SEO оптимально до 160 символов)
+    if len(meta_description) > 160:
+        meta_description = f"Купить {name.lower()} - широкий выбор, лучшие цены, быстрая доставка. Гарантия качества."
+    
+    # Генерируем ключевые слова
+    meta_keywords = f"{name.lower()}, {', '.join(category_keywords[:5])}, купить, цена, интернет-магазин"
+    
+    return {
+        "meta_title": meta_title,
+        "meta_description": meta_description,
+        "meta_keywords": meta_keywords
+    }
+
 def clean_text(text: str) -> str:
     """Очищает текст от лишних пробелов и переносов строк"""
     if not text:
