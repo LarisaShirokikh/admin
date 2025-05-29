@@ -1,62 +1,78 @@
-from fastapi import APIRouter, UploadFile, File, Form, Depends, HTTPException
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.future import select
-from app.crud.video import detect_product_for_video
-from app.schemas.video import VideoUpdate
-from app.models.video import Video
-from app.models.product import Product
-from app.models.category import Category
-from app.models.catalog import Catalog
-from app.deps import get_db
+import tempfile
 import os
+from fastapi import APIRouter, UploadFile, File, HTTPException, Depends, BackgroundTasks
+from sqlalchemy.ext.asyncio import AsyncSession
+from app.deps import get_db
+from app.crud.video import VideoProcessor, create_video
+from app.schemas.video import VideoCreate
 
 router = APIRouter()
 
-@router.post("/", response_model=VideoUpdate)
-async def upload_product_video(
-    title: str = Form(...),
-    description: str = Form(None),
-    auto_detect_product: bool = Form(True),  # По умолчанию True - всегда определяем продукт
-    is_featured: bool = Form(False),
-    video: UploadFile = File(...),
+# Инициализируем процессор видео
+video_processor = VideoProcessor(media_root="/app/media")
+
+@router.post("/upload/")
+async def upload_video(
+    background_tasks: BackgroundTasks,
+    file: UploadFile = File(...),
+    title: str = "",
+    description: str = "",
+    product_slug: str = None,
     db: AsyncSession = Depends(get_db)
 ):
-    # Сохраняем видео
-    upload_dir = "media/videos"
-    os.makedirs(upload_dir, exist_ok=True)
-
-    file_path = os.path.join(upload_dir, video.filename)
-    with open(file_path, "wb") as f:
-        f.write(await video.read())
+    """
+    Загрузка и обработка видео
+    """
+    # Проверяем формат файла
+    allowed_formats = ['.mp4', '.mov', '.avi', '.mkv', '.webm']
+    file_extension = os.path.splitext(file.filename)[1].lower()
     
-    # Переменные для привязки к продукту
-    product_id = None
-    product_slug_value = None
+    if file_extension not in allowed_formats:
+        raise HTTPException(400, f"Неподдерживаемый формат файла. Разрешены: {', '.join(allowed_formats)}")
     
-    # Автоопределение продукта, если включено
-    if auto_detect_product:
-        detected_product = await detect_product_for_video(db, title, description)
+    # Проверяем размер файла (например, макс 100MB)
+    max_size = 100 * 1024 * 1024  # 100MB
+    file_content = await file.read()
+    if len(file_content) > max_size:
+        raise HTTPException(400, "Файл слишком большой. Максимальный размер: 100MB")
+    
+    # Сохраняем во временный файл
+    with tempfile.NamedTemporaryFile(delete=False, suffix=file_extension) as temp_file:
+        temp_file.write(file_content)
+        temp_path = temp_file.name
+    
+    try:
+        # Обрабатываем видео
+        processing_result = video_processor.process_video(temp_path, file.filename)
         
-        if detected_product:
-            product_id = detected_product.id
-            product_slug_value = detected_product.slug
+        # Создаем запись в базе данных
+        video_data = VideoCreate(
+            title=title or f"Видео {file.filename}",
+            description=description,
+            url=processing_result["video_path"],
+            thumbnail_url=processing_result["thumbnail_path"],
+            duration=processing_result["duration"],
+            product_slug=product_slug,
+            is_active=True,
+            is_featured=False
+        )
+        
+        video = await create_video(db, video_data)
+        
+        return {
+            "message": "Видео успешно загружено и обработано",
+            "video_id": video.id,
+            "video_url": processing_result["video_path"],
+            "thumbnail_url": processing_result["thumbnail_path"],
+            "duration": processing_result["duration"],
+            "file_size_mb": round(processing_result["file_size"] / (1024 * 1024), 2),
+            "processed": processing_result["processed"]
+        }
+        
+    except Exception as e:
+        raise HTTPException(500, f"Ошибка обработки видео: {str(e)}")
     
-    # Создание записи в БД
-    video_obj = Video(
-        title=title,
-        description=description,
-        url=f"/media/videos/{video.filename}",
-        product_id=product_id,
-        product_slug=product_slug_value,
-        is_featured=is_featured,
-        auto_detected=auto_detect_product and product_id is not None
-    )
-    
-    db.add(video_obj)
-    await db.commit()
-    await db.refresh(video_obj)
-    
-    # Запускаем асинхронную задачу для обработки видео (если используется Celery)
-    # process_uploaded_video.delay(video_obj.id)
-    
-    return video_obj
+    finally:
+        # Удаляем временный файл
+        if os.path.exists(temp_path):
+            os.unlink(temp_path)

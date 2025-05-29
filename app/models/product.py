@@ -40,7 +40,6 @@ class Product(Base):
     catalog = relationship("Catalog", back_populates="products")
     categories = relationship("Category", secondary=product_category, back_populates="products")
     brand = relationship("Brand", back_populates="products")  # Добавлено в админку
-    colors = relationship("Color", secondary=product_color, back_populates="products")  # Добавлено в админку
     reviews = relationship("Review", back_populates="product", cascade="all, delete-orphan")  # Добавлено в админку
     product_images = relationship("ProductImage", back_populates="product", cascade="all, delete-orphan")
 

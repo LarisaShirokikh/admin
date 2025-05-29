@@ -258,6 +258,13 @@ async def manage_product_images(
 
 # ---------------------- Основные функции CRUD ----------------------
 
+async def get_product_by_title(db: AsyncSession, title: str):
+    """Получение продукта по тайтлу"""
+    result = await db.execute(
+        select(Product).where(Product.title == title)
+    )
+    return result.scalar_one_or_none()
+
 async def get_all_products(db: AsyncSession):
     """
     Получить все продукты.

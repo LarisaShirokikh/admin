@@ -1,115 +1,149 @@
-from sqlalchemy import func, or_, and_
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.future import select
-from app.models.product import Product
-from app.models.catalog import Catalog
-from app.models.category import Category
-from typing import Optional, List, Dict, Tuple
-import re
-import logging
-logger = logging.getLogger(__name__)
+import os
+import subprocess
+from pathlib import Path
+from typing import Tuple, Optional
+import uuid
+from PIL import Image
 
-async def detect_product_for_video(
-    db: AsyncSession, 
-    title: str, 
-    description: Optional[str] = None
-) -> Optional[Product]:
-    """
-    Улучшенная функция для более точного определения продукта на основе заголовка и описания видео.
-    """
-    if not title:
+
+class VideoProcessor:
+    def __init__(self, media_root: str):
+        self.media_root = Path(media_root)
+        self.video_dir = self.media_root / "videos"
+        self.thumbnail_dir = self.media_root / "thumbnails"
+        
+        # Создаем папки если не существуют
+        self.video_dir.mkdir(exist_ok=True)
+        self.thumbnail_dir.mkdir(exist_ok=True)
+
+    def process_video(self, input_path: str, original_filename: str) -> dict:
+        """
+        Обрабатывает видео: сжимает, создает превью, возвращает информацию
+        """
+        file_uuid = str(uuid.uuid4())
+        base_name = Path(original_filename).stem
+        
+        # Пути для выходных файлов
+        output_filename = f"{file_uuid}_{base_name}.mp4"
+        output_path = self.video_dir / output_filename
+        thumbnail_filename = f"{file_uuid}_{base_name}_thumb.jpg"
+        thumbnail_path = self.thumbnail_dir / thumbnail_filename
+        
+        try:
+            # 1. Сжимаем и конвертируем видео
+            duration = self._compress_video(input_path, str(output_path))
+            
+            # 2. Создаем превью
+            self._create_thumbnail(str(output_path), str(thumbnail_path))
+            
+            # 3. Получаем размер файлов
+            video_size = os.path.getsize(output_path)
+            
+            return {
+                "video_path": f"/media/videos/{output_filename}",
+                "thumbnail_path": f"/media/thumbnails/{thumbnail_filename}",
+                "duration": duration,
+                "file_size": video_size,
+                "processed": True
+            }
+            
+        except Exception as e:
+            print(f"Ошибка обработки видео: {e}")
+            # Если обработка не удалась, просто копируем оригинал
+            return self._fallback_processing(input_path, original_filename)
+
+    def _compress_video(self, input_path: str, output_path: str) -> Optional[float]:
+        """
+        Сжимает видео с оптимальными настройками для веба
+        """
+        cmd = [
+            'ffmpeg', '-y', '-i', input_path,
+            # Видео кодек H.264 для лучшей совместимости
+            '-c:v', 'libx264',
+            # Аудио кодек AAC
+            '-c:a', 'aac',
+            # Битрейт видео (чем меньше, тем меньше размер)
+            '-b:v', '1000k',
+            # Битрейт аудио
+            '-b:a', '128k',
+            # Ограничиваем разрешение (макс 1080p)
+            '-vf', 'scale=min(1920\\,iw):min(1080\\,ih):force_original_aspect_ratio=decrease',
+            # Оптимизация для веб-стриминга
+            '-movflags', '+faststart',
+            # Профиль для лучшей совместимости
+            '-profile:v', 'main',
+            '-preset', 'medium',
+            output_path
+        ]
+        
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)  # 5 минут таймаут
+            if result.returncode != 0:
+                print(f"FFmpeg error: {result.stderr}")
+                return None
+                
+            # Получаем длительность видео
+            return self._get_video_duration(output_path)
+            
+        except subprocess.TimeoutExpired:
+            print("Таймаут обработки видео")
+            return None
+        except Exception as e:
+            print(f"Ошибка FFmpeg: {e}")
+            return None
+
+    def _create_thumbnail(self, video_path: str, thumbnail_path: str):
+        """
+        Создает превью из первой секунды видео
+        """
+        cmd = [
+            'ffmpeg', '-y', '-i', video_path,
+            '-ss', '00:00:01.000',  # Берем кадр с 1 секунды
+            '-vframes', '1',
+            '-vf', 'scale=320:240:force_original_aspect_ratio=decrease',
+            thumbnail_path
+        ]
+        
+        try:
+            subprocess.run(cmd, capture_output=True, timeout=30)
+        except Exception as e:
+            print(f"Ошибка создания превью: {e}")
+
+    def _get_video_duration(self, video_path: str) -> Optional[float]:
+        """
+        Получает длительность видео в секундах
+        """
+        cmd = [
+            'ffprobe', '-v', 'quiet', '-print_format', 'compact=print_section=0:nokey=1:escape=csv',
+            '-show_entries', 'format=duration', video_path
+        ]
+        
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            if result.returncode == 0:
+                return float(result.stdout.strip())
+        except Exception as e:
+            print(f"Ошибка получения длительности: {e}")
+        
         return None
-    
-    # Нормализация текста
-    search_text = title.lower()
-    if description:
-        search_text += " " + description.lower()
-    
-    # Очистка текста от спецсимволов и удаление стоп-слов
-    search_text = re.sub(r'[^\w\s]', ' ', search_text)
-    stop_words = {'и', 'в', 'на', 'с', 'по', 'для', 'от', 'к', 'о', 'из', 'у', 'за', 'как', 'обзор', 'видео'}
-    words = [word for word in search_text.split() if word not in stop_words and len(word) > 2]
-    
-    if not words:
-        return None
-    
-    # Найдем все продукты с точным соответствием в названии
-    exact_match_query = select(Product).where(
-        func.lower(Product.name).contains(" ".join(words[:2]))
-    )
-    
-    result = await db.execute(exact_match_query)
-    exact_match = result.scalars().first()
-    
-    if exact_match:
-        return exact_match
-    
-    # Поиск по отдельным словам с весами
-    word_conditions = []
-    for word in words:
-        if len(word) > 3:  # Игнорируем короткие слова для уменьшения шума
-            word_conditions.append(func.lower(Product.name).contains(word))
-            if description:
-                word_conditions.append(func.lower(Product.description).contains(word))
-    
-    if not word_conditions:
-        return None
-    
-    # Собираем все продукты с совпадениями для подсчета релевантности
-    query = select(Product).where(or_(*word_conditions))
-    result = await db.execute(query)
-    products = result.scalars().all()
-    
-    if not products:
-        return None
-    
-    # Подсчет релевантности для каждого продукта
-    relevance_scores = {}
-    for product in products:
-        score = 0
-        product_name_lower = product.name.lower()
-        product_description_lower = product.description.lower() if product.description else ""
+
+    def _fallback_processing(self, input_path: str, original_filename: str) -> dict:
+        """
+        Запасной вариант если FFmpeg не работает
+        """
+        import shutil
         
-        # Проверка на совпадение модели или артикула (важные слова)
-        model_pattern = r'[а-яА-Я0-9]+-\d+'
-        models_in_search = re.findall(model_pattern, search_text)
-        models_in_product = re.findall(model_pattern, product_name_lower)
+        file_uuid = str(uuid.uuid4())
+        output_filename = f"{file_uuid}_{original_filename}"
+        output_path = self.video_dir / output_filename
         
-        # Если найдено совпадение по модели/артикулу - высокий приоритет
-        if models_in_search and models_in_product:
-            if any(m in product_name_lower for m in models_in_search):
-                score += 100
+        # Просто копируем файл
+        shutil.copy2(input_path, output_path)
         
-        # Проверка на совпадение по названию
-        for word in words:
-            if word in product_name_lower:
-                # Слова в названии имеют больший вес
-                score += 10
-            elif product_description_lower and word in product_description_lower:
-                # Слова в описании имеют меньший вес
-                score += 3
-        
-        # Бонус за длину названия - чем короче, тем лучше (более конкретное)
-        name_length_bonus = max(0, 50 - len(product_name_lower)) / 5
-        score += name_length_bonus
-        
-        relevance_scores[product.id] = score
-    
-    # Выбираем продукт с максимальной релевантностью
-    if relevance_scores:
-        best_product_id = max(relevance_scores, key=relevance_scores.get)
-        best_product = next((p for p in products if p.id == best_product_id), None)
-        logger.warning(
-            f"Низкая релевантность ({relevance_scores[best_product_id]}) "
-            f"для видео '{title}' и продукта {best_product.name}"
-        )
-        
-        # Проверка порога релевантности
-        if best_product and relevance_scores[best_product_id] > 10:
-            logger.info(
-                f"Для видео '{title}' найден продукт: {best_product.name} "
-                f"(релевантность: {relevance_scores[best_product_id]})"
-            )
-            return best_product
-    
-    return None
+        return {
+            "video_path": f"/media/videos/{output_filename}",
+            "thumbnail_path": None,
+            "duration": None,
+            "file_size": os.path.getsize(output_path),
+            "processed": False
+        }
