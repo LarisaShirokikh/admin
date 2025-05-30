@@ -123,8 +123,7 @@ async def find_or_create_catalog(db: AsyncSession, catalog_name: str, images=Non
         # Создаем категорию по умолчанию
         default_category = Category(
             name="Default Category",
-            slug="default-category",
-            brand_id=1  # Предполагаем, что бренд с ID 1 существует
+            slug="default-category"
         )
         db.add(default_category)
         await db.flush()
@@ -316,14 +315,16 @@ async def get_all_products_filtered(
     Returns:
         List[Product]: Отфильтрованный список продуктов
     """
-    query = select(Product).join(Catalog).join(Category).join(Brand)
+    # ИСПРАВЛЕНО: Убираем JOIN с Brand, так как может быть не у всех продуктов есть brand
+    query = select(Product).join(Catalog).join(Category)
 
     if catalog_id:
         query = query.where(Product.catalog_id == catalog_id)
     if category_id:
         query = query.where(Catalog.category_id == category_id)
     if brand_id:
-        query = query.where(Category.brand_id == brand_id)
+        # ИСПРАВЛЕНО: Используем Product.brand_id вместо несуществующего Category.brand_id
+        query = query.where(Product.brand_id == brand_id)
     if price_from is not None:
         query = query.where(Product.price >= price_from)
     if price_to is not None:
