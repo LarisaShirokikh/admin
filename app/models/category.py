@@ -1,5 +1,5 @@
-# Модель Category с полями из обоих приложений
-from sqlalchemy import Column, Integer, String, ForeignKey, Boolean, DateTime, Text
+# app/models/category.py
+from sqlalchemy import Column, Integer, String, Boolean, DateTime, Text
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from app.core.database import Base
@@ -21,9 +21,8 @@ class Category(Base):
 
     product_count = Column(Integer, default=0)
     
-    # Связи
-    products = relationship("Product", secondary="product_category", back_populates="categories")
-    children = relationship("Category", backref="parent", remote_side=[id])
+    # ПРОСТАЯ СВЯЗЬ: One-to-Many (продукт принадлежит одной категории)
+    products = relationship("Product", back_populates="category")
 
     def __repr__(self):
         return f"<Category {self.name}>"

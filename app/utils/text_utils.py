@@ -1,6 +1,7 @@
 import hashlib
 import re
 import time
+from typing import List
 
 def generate_slug(text: str) -> str:
     """
@@ -103,9 +104,137 @@ def generate_seo_meta(name: str) -> dict:
     }
 
 def clean_text(text: str) -> str:
-    """Очищает текст от лишних пробелов и переносов строк"""
+    """
+    Очистка текста от лишних символов
+    
+    Args:
+        text: Исходный текст
+        
+    Returns:
+        str: Очищенный текст
+    """
     if not text:
         return ""
-    # Заменяем множественные пробелы и переносы строк на один пробел
-    cleaned = re.sub(r'\s+', ' ', text)
-    return cleaned.strip()
+    
+    # Убираем лишние пробелы
+    text = re.sub(r'\s+', ' ', text.strip())
+    
+    # Убираем опасные HTML символы
+    text = text.replace('<', '&lt;').replace('>', '&gt;')
+    
+    return text
+
+def truncate_text(text: str, max_length: int, suffix: str = "...") -> str:
+    """
+    Обрезка текста до указанной длины
+    
+    Args:
+        text: Исходный текст
+        max_length: Максимальная длина
+        suffix: Суффикс для обрезанного текста
+        
+    Returns:
+        str: Обрезанный текст
+    """
+    if not text or len(text) <= max_length:
+        return text
+    
+    return text[:max_length - len(suffix)] + suffix
+
+
+def validate_slug(slug: str) -> bool:
+    """
+    Валидация slug
+    
+    Args:
+        slug: Slug для проверки
+        
+    Returns:
+        bool: True если slug валидный
+    """
+    if not slug:
+        return False
+    
+    # Проверяем что slug содержит только допустимые символы
+    pattern = r'^[a-z0-9\-]+$'
+    return bool(re.match(pattern, slug))
+
+
+def extract_keywords(text: str, max_keywords: int = 10) -> List[str]:
+    """
+    Извлечение ключевых слов из текста
+    
+    Args:
+        text: Исходный текст
+        max_keywords: Максимальное количество ключевых слов
+        
+    Returns:
+        List[str]: Список ключевых слов
+    """
+    if not text:
+        return []
+    
+    # Приводим к нижнему регистру и разбиваем на слова
+    words = re.findall(r'\b\w+\b', text.lower())
+    
+    # Убираем короткие слова и стоп-слова
+    stop_words = {
+        'и', 'в', 'на', 'с', 'по', 'для', 'из', 'к', 'от', 'о', 'об', 'до',
+        'за', 'при', 'над', 'под', 'про', 'через', 'без', 'между', 'среди',
+        'а', 'но', 'или', 'да', 'не', 'ни', 'то', 'же', 'ли', 'бы', 'уж',
+        'the', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of',
+        'with', 'by', 'from', 'up', 'about', 'into', 'through', 'during'
+    }
+    
+    keywords = [
+        word for word in words 
+        if len(word) >= 3 and word not in stop_words
+    ]
+    
+    # Убираем дублирующиеся ключевые слова, сохраняя порядок
+    unique_keywords = list(dict.fromkeys(keywords))
+    
+    return unique_keywords[:max_keywords]
+
+
+def format_price(price: float) -> str:
+    """
+    Форматирование цены для отображения
+    
+    Args:
+        price: Цена в рублях
+        
+    Returns:
+        str: Отформатированная цена
+    """
+    if price == 0:
+        return "Бесплатно"
+    
+    return f"{price:,.0f} ₽".replace(',', ' ')
+
+
+def generate_category_description(name: str, product_count: int = 0) -> str:
+    """
+    Генерация описания для категории
+    
+    Args:
+        name: Название категории
+        product_count: Количество товаров в категории
+        
+    Returns:
+        str: Сгенерированное описание
+    """
+    templates = [
+        f"В категории '{name}' представлен широкий выбор качественных дверей.",
+        f"Категория '{name}' включает в себя различные модели дверей для любых потребностей.",
+        f"В разделе '{name}' вы найдете двери высокого качества по доступным ценам.",
+    ]
+    
+    base_description = templates[0]  # Используем первый шаблон
+    
+    if product_count > 0:
+        base_description += f" В наличии {product_count} моделей."
+    
+    base_description += " Быстрая доставка и профессиональная установка."
+    
+    return base_description

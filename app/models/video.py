@@ -1,3 +1,4 @@
+# app/models/video.py
 import uuid
 from sqlalchemy import Boolean, Column, DateTime, Float, Integer, String, ForeignKey, Text, func
 from sqlalchemy.orm import relationship
@@ -14,19 +15,13 @@ class Video(Base):
     thumbnail_url = Column(String, nullable=True)
     duration = Column(Float, nullable=True)  # в секундах
     
-    # Убираем поля для catalog и category, оставляем только product
-    product_slug = Column(String, nullable=True, index=True)
+    # Только product_id, убираем product_slug
     product_id = Column(Integer, ForeignKey("products.id"), nullable=True)
     
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
     is_active = Column(Boolean, default=True)
     is_featured = Column(Boolean, default=False)
-
-    detection_confidence = Column(Float, nullable=True)
     
-    # Добавляем поля для отслеживания автоопределения (опционально)
-    auto_detected = Column(Boolean, default=False)
-    
-    # Связь только с продуктом
+    # Связь с продуктом
     product = relationship("Product", back_populates="videos")

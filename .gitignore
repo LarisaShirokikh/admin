@@ -33,6 +33,7 @@ ENV/
 .env.staging
 
 # Media/Upload files
+media/
 media/videos
 uploads/
 static/

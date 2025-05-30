@@ -13,12 +13,6 @@ product_category = Table(
     Column("created_at", DateTime(timezone=True), server_default=func.now())
 )
 
-# Таблица связи продуктов и цветов (добавлено в админку)
-product_color = Table(
-    'product_color',
-    Base.metadata,
-    Column('product_id', Integer, ForeignKey('products.id', ondelete='CASCADE'), primary_key=True),
-    Column('color_id', Integer, ForeignKey('colors.id', ondelete='CASCADE'), primary_key=True)
-)
+
 
 

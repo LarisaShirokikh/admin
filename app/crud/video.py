@@ -1,9 +1,17 @@
+# app/crud/video.py
 import os
 import subprocess
-from pathlib import Path
-from typing import Tuple, Optional
 import uuid
-from PIL import Image
+import re
+from pathlib import Path
+from typing import Optional, List
+from difflib import SequenceMatcher
+from sqlalchemy import and_, select, update, delete
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.models.video import Video
+from app.models.product import Product
+from app.schemas.video import VideoCreate, VideoUpdate
 
 
 class VideoProcessor:
@@ -147,3 +155,233 @@ class VideoProcessor:
             "file_size": os.path.getsize(output_path),
             "processed": False
         }
+
+
+# CRUD функции для работы с видео
+async def create_video(db: AsyncSession, video_data: VideoCreate) -> Video:
+    """Создание нового видео"""
+    video = Video(**video_data.dict())
+    db.add(video)
+    await db.commit()
+    await db.refresh(video)
+    return video
+
+async def get_video_by_id(db: AsyncSession, video_id: int) -> Optional[Video]:
+    """Получение видео по ID"""
+    result = await db.execute(
+        select(Video).where(Video.id == video_id)
+    )
+    return result.scalar_one_or_none()
+
+async def get_video_by_uuid(db: AsyncSession, video_uuid: str) -> Optional[Video]:
+    """Получение видео по UUID"""
+    result = await db.execute(
+        select(Video).where(Video.uuid == video_uuid)
+    )
+    return result.scalar_one_or_none()
+
+async def get_videos(
+    db: AsyncSession, 
+    skip: int = 0, 
+    limit: int = 100,
+    is_active: Optional[bool] = None,
+    is_featured: Optional[bool] = None,
+    product_id: Optional[int] = None
+) -> List[Video]:
+    """Получение списка видео с фильтрами"""
+    query = select(Video)
+    
+    filters = []
+    if is_active is not None:
+        filters.append(Video.is_active == is_active)
+    if is_featured is not None:
+        filters.append(Video.is_featured == is_featured)
+    if product_id is not None:
+        filters.append(Video.product_id == product_id)
+    
+    if filters:
+        query = query.where(and_(*filters))
+    
+    query = query.offset(skip).limit(limit).order_by(Video.created_at.desc())
+    
+    result = await db.execute(query)
+    return result.scalars().all()
+
+async def get_videos_by_product_id(db: AsyncSession, product_id: int) -> List[Video]:
+    """Получение всех видео для продукта"""
+    result = await db.execute(
+        select(Video)
+        .where(Video.product_id == product_id)
+        .order_by(Video.created_at.desc())
+    )
+    return result.scalars().all()
+
+async def search_videos(db: AsyncSession, query_text: str) -> List[Video]:
+    """Поиск видео по названию и описанию"""
+    result = await db.execute(
+        select(Video)
+        .where(
+            and_(
+                Video.is_active == True,
+                Video.title.ilike(f'%{query_text}%')
+            )
+        )
+        .order_by(Video.created_at.desc())
+    )
+    return result.scalars().all()
+
+async def update_video(db: AsyncSession, video_id: int, video_data: VideoUpdate) -> Optional[Video]:
+    """Обновление видео"""
+    # Получаем только заполненные поля
+    update_data = {k: v for k, v in video_data.dict().items() if v is not None}
+    
+    if not update_data:
+        return await get_video_by_id(db, video_id)
+    
+    await db.execute(
+        update(Video)
+        .where(Video.id == video_id)
+        .values(**update_data)
+    )
+    await db.commit()
+    
+    return await get_video_by_id(db, video_id)
+
+async def delete_video(db: AsyncSession, video_id: int) -> bool:
+    """Удаление видео"""
+    # Получаем видео для удаления файлов
+    video = await get_video_by_id(db, video_id)
+    if not video:
+        return False
+    
+    # Удаляем файлы
+    delete_video_files(video.url, video.thumbnail_url)
+    
+    # Удаляем запись из БД
+    result = await db.execute(
+        delete(Video).where(Video.id == video_id)
+    )
+    await db.commit()
+    
+    return result.rowcount > 0
+
+async def toggle_video_status(db: AsyncSession, video_id: int) -> Optional[Video]:
+    """Переключение статуса активности видео"""
+    video = await get_video_by_id(db, video_id)
+    if not video:
+        return None
+    
+    new_status = not video.is_active
+    return await update_video(db, video_id, VideoUpdate(is_active=new_status))
+
+async def toggle_featured_status(db: AsyncSession, video_id: int) -> Optional[Video]:
+    """Переключение статуса избранного видео"""
+    video = await get_video_by_id(db, video_id)
+    if not video:
+        return None
+    
+    new_status = not video.is_featured
+    return await update_video(db, video_id, VideoUpdate(is_featured=new_status))
+
+async def find_product_by_title(db: AsyncSession, video_title: str) -> Optional[Product]:
+    """
+    Улучшенный поиск продукта по названию видео
+    """
+    # Очищаем название от лишних символов
+    cleaned_title = re.sub(r'[^\w\s]', '', video_title.lower()).strip()
+    
+    # Получаем все активные продукты
+    result = await db.execute(
+        select(Product).where(Product.is_active == True)
+    )
+    products = result.scalars().all()
+    
+    best_match = None
+    best_score = 0
+    
+    for product in products:
+        product_name = re.sub(r'[^\w\s]', '', product.name.lower()).strip()
+        
+        # Проверяем точное вхождение
+        if product_name in cleaned_title or cleaned_title in product_name:
+            return product
+        
+        # Вычисляем схожесть строк
+        similarity = SequenceMatcher(None, cleaned_title, product_name).ratio()
+        
+        if similarity > best_score and similarity > 0.6:  # порог схожести 60%
+            best_score = similarity
+            best_match = product
+    
+    return best_match
+
+async def auto_link_video_to_product(db: AsyncSession, video_id: int) -> Optional[Video]:
+    """Автоматическая привязка видео к продукту по названию"""
+    video = await get_video_by_id(db, video_id)
+    if not video or video.product_id:
+        return video  # Уже привязано к продукту
+    
+    # Ищем подходящий продукт
+    product = await find_product_by_title(db, video.title)
+    if product:
+        return await update_video(db, video_id, VideoUpdate(product_id=product.id))
+    
+    return video
+
+async def suggest_products_for_video(db: AsyncSession, video_title: str, limit: int = 5) -> List[tuple]:
+    """
+    Предложение продуктов для привязки к видео
+    Возвращает список кортежей (product, score)
+    """
+    cleaned_title = re.sub(r'[^\w\s]', '', video_title.lower()).strip()
+    
+    result = await db.execute(
+        select(Product).where(Product.is_active == True)
+    )
+    products = result.scalars().all()
+    
+    suggestions = []
+    
+    for product in products:
+        product_name = re.sub(r'[^\w\s]', '', product.name.lower()).strip()
+        similarity = SequenceMatcher(None, cleaned_title, product_name).ratio()
+        
+        if similarity > 0.3:  # минимальная схожесть 30%
+            suggestions.append((product, similarity))
+    
+    # Сортируем по убыванию схожести
+    suggestions.sort(key=lambda x: x[1], reverse=True)
+    
+    return suggestions[:limit]
+
+def delete_video_files(video_url: str, thumbnail_url: Optional[str] = None):
+    """Удаление файлов видео и превью"""
+    media_root = Path("/app/media")
+    
+    # Удаляем видео файл
+    if video_url and video_url.startswith("/media/"):
+        video_path = media_root / video_url[7:]  # убираем /media/
+        if video_path.exists():
+            try:
+                video_path.unlink()
+            except Exception as e:
+                print(f"Ошибка удаления видео файла {video_path}: {e}")
+    
+    # Удаляем превью
+    if thumbnail_url and thumbnail_url.startswith("/media/"):
+        thumbnail_path = media_root / thumbnail_url[7:]  # убираем /media/
+        if thumbnail_path.exists():
+            try:
+                thumbnail_path.unlink()
+            except Exception as e:
+                print(f"Ошибка удаления превью {thumbnail_path}: {e}")
+
+async def get_featured_videos(db: AsyncSession, limit: int = 10) -> List[Video]:
+    """Получение избранных видео"""
+    result = await db.execute(
+        select(Video)
+        .where(and_(Video.is_active == True, Video.is_featured == True))
+        .order_by(Video.created_at.desc())
+        .limit(limit)
+    )
+    return result.scalars().all()

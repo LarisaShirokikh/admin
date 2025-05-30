@@ -12,7 +12,6 @@ from .import_log import ImportLog
 
 # Добавляем новые базовые модели
 from .brand import Brand
-from .color import Color
 
 # Импорт моделей с внешними зависимостями
 from .category import Category
@@ -25,7 +24,7 @@ from .review import Review
 from .product_ranking import ProductRanking
 
 # Импорт связующих таблиц
-from .attributes import product_category, product_color
+from .attributes import product_category
 
 __all__ = [
     "Category",
@@ -37,10 +36,8 @@ __all__ = [
     "Banner",
     "Promotion",
     "Video",
-    "Brand",   
-    "Color",
+    "Brand", 
     "Review",  
     "product_category",
-    "product_color",
     "ProductRanking"
 ]

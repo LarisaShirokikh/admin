@@ -5,7 +5,7 @@ from sqlalchemy import Column, Integer, String, Float, Boolean, DateTime, Foreig
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from app.core.database import Base
-from app.models.attributes import product_category, product_color
+from app.models.attributes import product_category
 
 class Product(Base):
     __tablename__ = "products"
@@ -36,14 +36,16 @@ class Product(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now())  # Добавлено в админку
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())  # Добавлено в админку
 
+    category_id = Column(Integer, ForeignKey("categories.id"), nullable=True)
+
     # Связи
     catalog = relationship("Catalog", back_populates="products")
-    categories = relationship("Category", secondary=product_category, back_populates="products")
+    category = relationship("Category", back_populates="products")
     brand = relationship("Brand", back_populates="products")  # Добавлено в админку
     reviews = relationship("Review", back_populates="product", cascade="all, delete-orphan")  # Добавлено в админку
     product_images = relationship("ProductImage", back_populates="product", cascade="all, delete-orphan")
 
-    videos = relationship("Video", back_populates="product")
+    videos = relationship("Video", back_populates="product", cascade="all, delete-orphan")
     
     def __repr__(self):
         return f"<Product {self.name}>"

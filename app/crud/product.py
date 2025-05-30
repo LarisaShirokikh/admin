@@ -285,7 +285,6 @@ async def get_product_by_id(db: AsyncSession, product_id: int) -> Optional[Produ
     stmt = (
         select(Product)
         .options(
-            selectinload(Product.colors),
             selectinload(Product.reviews),
             selectinload(Product.categories)
         )

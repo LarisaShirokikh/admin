@@ -3,8 +3,6 @@
 from typing import Optional, List, Dict, Any, Union
 from pydantic import BaseModel, Field
 from app.schemas.product_image import ProductImageCreate, ProductImage
-from app.schemas.color import Color
-from app.schemas.material import Material
 from app.schemas.brand import Brand
 from app.schemas.review import Review
 
@@ -48,8 +46,6 @@ class ProductUpdate(BaseModel):
     meta_keywords: Optional[str] = None
     category_ids: Optional[List[int]] = None  # Список ID категорий
     primary_category_id: Optional[int] = None  # ID основной категории
-    colors: Optional[List[int]] = None  # Список ID цветов
-    materials: Optional[List[int]] = None  # Список ID материалов
 
 class ProductListItem(BaseModel):
     id: int
@@ -81,8 +77,6 @@ class ProductDetail(ProductBase):
     updated_at: Optional[str] = None
     images: List[ProductImage] = []
     brand: Optional[Brand] = None
-    colors: List[Color] = []
-    materials: List[Material] = []
     reviews: List[Review] = []
     categories: List[Dict[str, Any]] = []
     primary_category: Optional[Dict[str, Any]] = None
@@ -94,7 +88,6 @@ class ProductFilter(BaseModel):
     category_id: Optional[int] = None
     catalog_id: Optional[int] = None
     brand_id: Optional[int] = None
-    color_id: Optional[int] = None
     material_id: Optional[int] = None
     min_price: Optional[float] = None
     max_price: Optional[float] = None
