@@ -19,7 +19,7 @@ from app.models.brand import Brand
 from app.models.product import Product
 from app.schemas.product import ProductCreate
 from app.schemas.product_image import ProductImageCreate
-from app.models.attributes import product_category
+from app.models.attributes import product_categories
 
 # Базовый класс для скраперов
 class BaseScraper:
@@ -342,9 +342,9 @@ class BaseScraper:
         """
         # Проверяем, есть ли товар в категории
         result = await db.execute(
-            select(func.count()).select_from(product_category).where(
-                product_category.c.product_id == product_id,
-                product_category.c.category_id == category_id
+            select(func.count()).select_from(product_categories).where(
+                product_categories.c.product_id == product_id,
+                product_categories.c.category_id == category_id
             )
         )
         count = result.scalar_one()
@@ -357,10 +357,10 @@ class BaseScraper:
             }
             
             # Если таблица поддерживает флаг is_primary
-            if hasattr(product_category.c, 'is_primary'):
+            if hasattr(product_categories.c, 'is_primary'):
                 values['is_primary'] = is_primary
                 
-            stmt = insert(product_category).values(**values)
+            stmt = insert(product_categories).values(**values)
             await db.execute(stmt)
             self.logger.debug(f"Продукт ID:{product_id} добавлен в категорию ID:{category_id}")
 
@@ -533,7 +533,7 @@ class BaseScraper:
             return
         
         # Удаляем существующие связи
-        stmt = delete(product_category).where(product_category.c.product_id == product_id)
+        stmt = delete(product_categories).where(product_categories.c.product_id == product_id)
         await db.execute(stmt)
         
         # Выбираем первую категорию как основную
@@ -547,10 +547,10 @@ class BaseScraper:
             }
             
             # Если таблица поддерживает флаг is_primary
-            if hasattr(product_category.c, 'is_primary'):
+            if hasattr(product_categories.c, 'is_primary'):
                 values['is_primary'] = (category_id == primary_category_id)
                 
-            stmt = insert(product_category).values(**values)
+            stmt = insert(product_categories).values(**values)
             await db.execute(stmt)
     
     async def classify_and_update_product(self, db: AsyncSession, product_id: int, text_to_analyze: str, category_map: Dict[str, Dict]) -> None:
@@ -570,8 +570,8 @@ class BaseScraper:
         
         for category in categories:
             # Подсчитываем количество товаров в категории
-            count_query = select(func.count()).select_from(product_category).where(
-                product_category.c.category_id == category.id
+            count_query = select(func.count()).select_from(product_categories).where(
+                product_categories.c.category_id == category.id
             )
             result = await db.execute(count_query)
             count = result.scalar_one()
@@ -610,9 +610,9 @@ class BaseScraper:
         for product in products:
             # Проверяем, есть ли товар в категории "все двери"
             result = await db.execute(
-                select(func.count()).select_from(product_category).where(
-                    product_category.c.product_id == product.id,
-                    product_category.c.category_id == default_category_id
+                select(func.count()).select_from(product_categories).where(
+                    product_categories.c.product_id == product.id,
+                    product_categories.c.category_id == default_category_id
                 )
             )
             count = result.scalar_one()
@@ -625,10 +625,10 @@ class BaseScraper:
                 }
                 
                 # Если таблица поддерживает флаг is_primary
-                if hasattr(product_category.c, 'is_primary'):
+                if hasattr(product_categories.c, 'is_primary'):
                     values['is_primary'] = True
                     
-                stmt = insert(product_category).values(**values)
+                stmt = insert(product_categories).values(**values)
                 await db.execute(stmt)
                 added_count += 1
         
