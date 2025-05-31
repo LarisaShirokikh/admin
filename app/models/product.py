@@ -40,7 +40,7 @@ class Product(Base):
 
     # Связи
     catalog = relationship("Catalog", back_populates="products")
-    category = relationship("Category", secondary=product_categories, back_populates="products")
+    categories = relationship("Category", secondary=product_categories, back_populates="products")
     brand = relationship("Brand", back_populates="products")  # Добавлено в админку
     reviews = relationship("Review", back_populates="product", cascade="all, delete-orphan")  # Добавлено в админку
     product_images = relationship("ProductImage", back_populates="product", cascade="all, delete-orphan")
