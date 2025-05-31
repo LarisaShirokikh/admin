@@ -1,8 +1,10 @@
 # app/models/category.py
-from sqlalchemy import Column, Integer, String, Boolean, DateTime, Text
+from sqlalchemy import Column, ForeignKey, Integer, String, Boolean, DateTime, Table, Text
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from app.core.database import Base
+from .attributes import product_categories
+
 
 class Category(Base):
     __tablename__ = "categories"
@@ -21,8 +23,7 @@ class Category(Base):
 
     product_count = Column(Integer, default=0)
     
-    # ПРОСТАЯ СВЯЗЬ: One-to-Many (продукт принадлежит одной категории)
-    products = relationship("Product", back_populates="category")
+    products = relationship("Product", secondary=product_categories, back_populates="categories")
 
     def __repr__(self):
         return f"<Category {self.name}>"

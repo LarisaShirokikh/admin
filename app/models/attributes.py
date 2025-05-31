@@ -4,8 +4,8 @@ from sqlalchemy.sql import func
 from app.core.database import Base
 
 # Связующая таблица для отношения многие-ко-многим между Product и Category
-product_category = Table(
-    "product_category",
+product_categories = Table(
+    "product_categories",
     Base.metadata,
     Column("product_id", Integer, ForeignKey("products.id", ondelete="CASCADE"), primary_key=True),
     Column("category_id", Integer, ForeignKey("categories.id", ondelete="CASCADE"), primary_key=True),
