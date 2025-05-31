@@ -10,7 +10,8 @@ from app.api.v1.video import router as video_router
 from app.api.v1.brand import router as brand_router
 
 app = FastAPI(
-    title="Doors Admin API",
+    title="Admin API",
+    root_path="/admin-api",
     description="API для управления каталогом дверей",
     version="1.0.0"
 )
