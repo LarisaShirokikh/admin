@@ -11,6 +11,7 @@ from .product_image import ProductImage
 from .video import Video
 from .catalog_image import CatalogImage
 from .review import Review
+from .product_video import ProductVideo
 from .product_ranking import ProductRanking
 
 # Импорт связующих таблиц
@@ -29,5 +30,6 @@ __all__ = [
     "Brand", 
     "Review",  
     "product_categories",
-    "ProductRanking"
+    "ProductRanking",
+    "ProductVideo"
 ]
