@@ -25,57 +25,56 @@ class VideoProcessor:
         self.thumbnail_dir.mkdir(exist_ok=True)
 
     def process_video(self, input_path: str, original_filename: str) -> dict:
-        """
-        Обрабатывает видео: сжимает, создает превью, возвращает информацию
-        """
+        """ПРОСТОЕ копирование файла без FFmpeg"""
+        import shutil
+        
         file_uuid = str(uuid.uuid4())
         base_name = Path(original_filename).stem
         
-        # Пути для выходных файлов
+        # Всегда сохраняем как .mp4 для веба
         output_filename = f"{file_uuid}_{base_name}.mp4"
         output_path = self.video_dir / output_filename
-        thumbnail_filename = f"{file_uuid}_{base_name}_thumb.jpg"
-        thumbnail_path = self.thumbnail_dir / thumbnail_filename
         
         try:
-            # 1. Сжимаем и конвертируем видео
-            duration = self._compress_video(input_path, str(output_path))
+            # Просто копируем файл
+            shutil.copy2(input_path, output_path)
             
-            # 2. Создаем превью
-            self._create_thumbnail(str(output_path), str(thumbnail_path))
+            # Пытаемся установить права (может не сработать из-за Docker)
+            try:
+                os.chmod(output_path, 0o644)
+            except:
+                pass  # Игнорируем ошибку, исправим в роутере
             
-            # 3. Получаем размер файлов
-            video_size = os.path.getsize(output_path)
+            file_size = os.path.getsize(output_path)
             
             return {
                 "video_path": f"/media/videos/{output_filename}",
-                "thumbnail_path": f"/media/thumbnails/{thumbnail_filename}",
-                "duration": duration,
-                "file_size": video_size,
-                "processed": True
+                "thumbnail_path": None,
+                "duration": None,
+                "file_size": file_size,
+                "processed": False
             }
             
         except Exception as e:
-            print(f"Ошибка обработки видео: {e}")
-            # Если обработка не удалась, просто копируем оригинал
-            return self._fallback_processing(input_path, original_filename)
+            print(f"Ошибка копирования файла: {e}")
+            raise
+
+
+    def _quick_convert_mov_to_mp4(self, input_path: str, output_path: str):
+        """Быстрая конвертация MOV → MP4 без сжатия"""
+        cmd = [
+            'ffmpeg', '-y', '-i', input_path,
+            '-c', 'copy',  # Копируем потоки без перекодирования!
+            '-movflags', '+faststart',  # Для веб-стриминга
+            output_path
+        ]
         
-    def fix_file_permissions(processing_result: dict) -> None:
-        """Исправление прав доступа к созданным файлам"""
         try:
-            # Исправляем права к видеофайлу
-            video_file_path = os.path.join("/app/media", processing_result["video_path"].lstrip("/"))
-            if os.path.exists(video_file_path):
-                os.chmod(video_file_path, 0o644)
-            
-            # Исправляем права к thumbnail если есть
-            if processing_result.get("thumbnail_path"):
-                thumbnail_file_path = os.path.join("/app/media", processing_result["thumbnail_path"].lstrip("/"))
-                if os.path.exists(thumbnail_file_path):
-                    os.chmod(thumbnail_file_path, 0o644)
-                    
-        except Exception as e:
-            print(f"Не удалось установить права доступа: {e}")
+            subprocess.run(cmd, capture_output=True, timeout=60)  # 1 минута макс
+        except:
+            # Если не получилось, просто копируем
+            import shutil
+            shutil.copy2(input_path, output_path)
 
     def _compress_video(self, input_path: str, output_path: str) -> Optional[float]:
         """
@@ -175,23 +174,7 @@ class VideoProcessor:
 
 
 # CRUD функции для работы с видео
-def fix_file_permissions(processing_result: dict) -> None:
-        """Исправление прав доступа к созданным файлам"""
-        try:
-            # Исправляем права к видеофайлу
-            video_file_path = os.path.join("/app/media", processing_result["video_path"].lstrip("/"))
-            if os.path.exists(video_file_path):
-                os.chmod(video_file_path, 0o644)
-            
-            # Исправляем права к thumbnail если есть
-            if processing_result.get("thumbnail_path"):
-                thumbnail_file_path = os.path.join("/app/media", processing_result["thumbnail_path"].lstrip("/"))
-                if os.path.exists(thumbnail_file_path):
-                    os.chmod(thumbnail_file_path, 0o644)
-                    
-        except Exception as e:
-            print(f"Не удалось установить права доступа: {e}")
-            
+
 async def create_video(db: AsyncSession, video_data: VideoCreate) -> Video:
     """Создание нового видео"""
     video = Video(**video_data.dict())

@@ -90,7 +90,7 @@ async def upload_video(
         logger.info(f"✅ Видео загружено: ID {video.id}")
         try:
             import subprocess
-            video_full_path = f"/app/media{processing_result['video_path']}"
+            video_full_path = f"/app/{processing_result['video_path']}"
             subprocess.run(['chmod', '644', video_full_path], check=True)
             logger.info(f"🔧 Права исправлены для: {video_full_path}")
         except Exception as e:
