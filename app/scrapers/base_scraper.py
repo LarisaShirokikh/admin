@@ -1,5 +1,6 @@
 """
 Базовый модуль с общими компонентами для всех скраперов
+Работает только с существующими категориями из БД, не создает новые
 """
 import logging
 import re
@@ -10,9 +11,7 @@ import requests
 from sqlalchemy import func, insert, or_, select, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.utils.text_utils import clean_text, generate_slug
-from app.crud.product import create_or_update_product
-from app.data.categories_data import CATEGORY_KEYWORDS
+from app.utils.text_utils import generate_slug
 from app.models.catalog import Catalog
 from app.models.category import Category
 from app.models.brand import Brand
@@ -183,14 +182,18 @@ class BaseScraper:
         
         if not catalog:
             # Получаем категорию по умолчанию
-            default_category = await self.get_default_category(db, brand_id)
+            default_category = await self.get_default_category(db)
+            
+            if not default_category:
+                self.logger.error("Не найдена категория по умолчанию для создания каталога")
+                raise ValueError("Не найдена активная категория для создания каталога")
             
             # Создаем новый каталог с привязкой к бренду
             catalog = Catalog(
                 name=catalog_name,
                 slug=catalog_slug,
                 category_id=default_category.id,
-                brand_id=brand_id,  # Добавляем привязку к бренду
+                brand_id=brand_id,
                 is_active=True
             )
             db.add(catalog)
@@ -215,36 +218,6 @@ class BaseScraper:
                 self.logger.info(f"Обновлен существующий каталог: {catalog_name} (бренд ID: {brand_id})")
         
         return catalog
-    
-    async def get_default_category(self, db: AsyncSession, brand_id: int) -> Category:
-        """Получает или создает категорию по умолчанию 'Все двери'"""
-        # Сначала пробуем найти по slug
-        result = await db.execute(select(Category).where(Category.slug == "vse-dveri"))
-        default_category = result.scalar_one_or_none()
-        
-        # Если не нашли по slug, ищем по названию (для обратной совместимости)
-        if not default_category:
-            result = await db.execute(select(Category).where(
-                func.lower(Category.name) == "все двери"
-            ))
-            default_category = result.scalar_one_or_none()
-        
-        # Если все еще не нашли, создаем новую категорию
-        if not default_category:
-            default_category = Category(
-                name="Все двери",
-                slug="vse-dveri",
-                brand_id=brand_id,
-                meta_title="Все двери - Купить двери в магазине",
-                meta_description="Широкий выбор дверей всех типов. Высокое качество, доступные цены, гарантия от производителя.",
-                meta_keywords="двери, купить двери, входные двери, межкомнатные двери",
-                is_active=True
-            )
-            db.add(default_category)
-            await db.flush()
-            self.logger.info("Создана категория по умолчанию 'Все двери'")
-        
-        return default_category
     
     async def update_catalog_image(self, db: AsyncSession, catalog: Catalog, image_url: str) -> None:
         """Обновляет изображение каталога"""
@@ -290,45 +263,6 @@ class BaseScraper:
         if updated_count > 0:
             await db.flush()
             self.logger.info(f"Обновлено {updated_count} каталогов с привязкой к бренду ID: {brand_id}")
-        
-        # Дополнительно проверяем, чтобы все товары этого бренда были в категории "все двери"
-        await self.ensure_products_in_default_category(db, brand_id)
-
-    async def get_or_create_default_category(self, db: AsyncSession, brand_id: Optional[int] = None) -> Category:
-        """Получает или создает категорию 'все двери'"""
-        # Ищем категорию по имени
-        result = await db.execute(
-            select(Category).where(
-                func.lower(Category.name) == "все двери"
-            )
-        )
-        default_category = result.scalar_one_or_none()
-        
-        # Если не нашли, создаем новую
-        if not default_category:
-            # Получаем метаданные из CATEGORY_KEYWORDS
-            meta_data = {}
-            for cat_name, cat_data in CATEGORY_KEYWORDS.items():
-                if cat_name.lower() == "все двери":
-                    meta_data = cat_data
-                    break
-                    
-            # Создаем категорию
-            default_category = Category(
-                name="Все двери",
-                slug="vse-dveri",
-                brand_id=brand_id,
-                meta_title=meta_data.get("meta_title", "Все двери - Полный каталог"),
-                meta_description=meta_data.get("meta_description", "Полный каталог дверей всех типов и стилей."),
-                meta_keywords=meta_data.get("meta_keywords", "двери, входные двери, межкомнатные двери"),
-                image_url=meta_data.get("image_url", ""),
-                is_active=True
-            )
-            db.add(default_category)
-            await db.flush()
-            self.logger.info(f"Создана категория 'Все двери' (ID: {default_category.id})")
-        
-        return default_category
 
     async def add_product_to_category(self, db: AsyncSession, product_id: int, category_id: int, is_primary: bool = True) -> None:
         """
@@ -364,202 +298,6 @@ class BaseScraper:
             await db.execute(stmt)
             self.logger.debug(f"Продукт ID:{product_id} добавлен в категорию ID:{category_id}")
 
-    async def classify_product_additional_categories(self, db: AsyncSession, product_id: int, text_to_analyze: str, category_map: Dict[str, Dict]) -> None:
-        """
-        Классифицирует продукт по дополнительным категориям, кроме 'все двери'
-        
-        Args:
-            db: Сессия базы данных
-            product_id: ID продукта
-            text_to_analyze: Текст для анализа
-            category_map: Словарь с данными категорий
-        """
-        # Приводим текст к нижнему регистру для анализа
-        text_to_analyze = text_to_analyze.lower()
-        
-        # Для каждой категории проверяем наличие ключевых слов
-        for category_name, category_data in category_map.items():
-            # Пропускаем категорию "все двери" - продукт уже добавлен в неё
-            if category_name.lower() == "все двери":
-                continue
-                
-            category_id = category_data.get('id')
-            if not category_id:
-                continue
-            
-            # Получаем ключевые слова
-            keywords = category_data.get('keywords', [])
-            
-            # Проверяем вхождение ключевых слов
-            matches = 0
-            for keyword in keywords:
-                if keyword.lower() in text_to_analyze:
-                    matches += 1
-            
-            # Если есть хотя бы одно совпадение, добавляем в категорию
-            if matches > 0:
-                await self.add_product_to_category(db, product_id, category_id, is_primary=False)
-                self.logger.info(f"Продукт ID:{product_id} добавлен в дополнительную категорию '{category_name}' (найдено {matches} совпадений)")
-    
-    # ---------- Методы работы с категориями ----------
-    
-    async def ensure_categories_exist(self, db: AsyncSession, brand_id: int) -> None:
-        """Создаёт необходимые категории в базе данных"""
-        # Загружаем существующие категории
-        result = await db.execute(select(Category))
-        categories = result.scalars().all()
-        categories_dict = {category.name.lower(): category for category in categories}
-        
-        # Создаём недостающие категории
-        for category_name, category_data in CATEGORY_KEYWORDS.items():
-            if category_name.lower() not in categories_dict:
-                # Транслитерация для slug
-                slug = generate_slug(category_name)
-                
-                new_category = Category(
-                    name=category_name.title(),  # Преобразуем первые буквы слов в заглавные
-                    brand_id=brand_id, 
-                    slug=slug,  # Генерируем slug
-                    meta_title=category_data.get("meta_title", f"{category_name.title()} - Купить в магазине {self.brand_name}"),
-                    meta_description=category_data.get("meta_description", f"Широкий выбор товаров из категории {category_name}. Высокое качество, доступные цены, гарантия от производителя."),
-                    meta_keywords=category_data.get("meta_keywords", f"{category_name}, купить {category_name}, {category_name} от производителя"),
-                    image_url=category_data.get("image_url", "")
-                )
-                
-                # Если нужны дополнительные поля
-                if hasattr(Category, 'is_active'):
-                    new_category.is_active = True
-                
-                db.add(new_category)
-                await db.flush()
-                self.logger.info(f"Создана новая категория: {category_name.title()}")
-    
-    async def get_category_map(self, db: AsyncSession) -> Dict[str, Dict]:
-        """Получает маппинг категорий и их ключевых слов"""
-        result = await db.execute(select(Category))
-        categories = result.scalars().all()
-        
-        # Создаем маппинг имен категорий к их ID и ключевым словам
-        category_map = {}
-        for category in categories:
-            category_name = category.name.lower()
-            # Ищем ключевые слова для этой категории
-            keywords = []
-            for name, kws in CATEGORY_KEYWORDS.items():
-                if name.lower() == category_name:
-                    keywords = kws.get('keywords', [])
-                    break
-            
-            category_map[category_name] = {
-                'id': category.id,
-                'keywords': keywords
-            }
-        
-        return category_map
-    
-    async def classify_product(self, db: AsyncSession, product_id: int, text_to_analyze: str, category_map: Dict[str, Dict]) -> Set[int]:
-        """
-        Классифицирует продукт по категориям на основе текста.
-        Возвращает набор ID категорий, в которые следует добавить продукт
-        (кроме категории 'все двери', которая добавляется отдельно)
-        """
-        category_ids = set()
-        text_to_analyze = text_to_analyze.lower()
-        
-        # Получаем данные о продукте
-        product_result = await db.execute(select(Product).where(Product.id == product_id))
-        product = product_result.scalar_one_or_none()
-        
-        # Дополнительный буст для брендов (можно настроить для каждого бренда)
-        brand_boosts = {}
-        if product and product.brand_id:
-            brand_result = await db.execute(select(Brand).where(Brand.id == product.brand_id))
-            brand = brand_result.scalar_one_or_none()
-            if brand:
-                brand_name = brand.name.lower()
-                # Задаем бонусы для определенных брендов в определенных категориях
-                if brand_name == "лабиринт":
-                    brand_boosts = {
-                        "двери для квартиры": 1.5,
-                        "металлические двери": 1.5
-                    }
-                elif brand_name == "интекрон":
-                    brand_boosts = {
-                        "двери с электро замком": 1.5,
-                        "двери с терморазрывом": 1.3
-                    }
-        
-        # Анализируем каждую категорию
-        for category_name, category_data in category_map.items():
-            # Пропускаем категорию "все двери" - она добавляется отдельно
-            if category_name.lower() == "все двери":
-                continue
-                
-            category_id = category_data.get('id')
-            if not category_id:
-                continue
-            
-            # Получаем ключевые слова
-            keywords = category_data.get('keywords', [])
-            
-            # Проверяем вхождение ключевых слов
-            matches = 0
-            for keyword in keywords:
-                if keyword.lower() in text_to_analyze:
-                    matches += 1
-                    # Если есть бонус для этой категории от бренда
-                    if category_name.lower() in brand_boosts:
-                        matches += brand_boosts[category_name.lower()]
-            
-            # Если есть хотя бы одно совпадение, добавляем категорию
-            if matches > 0:
-                category_ids.add(category_id)
-                self.logger.info(f"Продукт ID:{product_id} добавлен в категорию '{category_name}' (найдено {matches} совпадений)")
-        
-        return category_ids
-    
-    async def add_product_to_categories(self, db: AsyncSession, product_id: int, category_ids: Set[int]) -> None:
-        """Добавляет продукт в указанные категории"""
-        if not category_ids:
-            self.logger.warning(f"Для продукта ID:{product_id} не найдено подходящих категорий")
-            return
-        
-        product_exists = await db.execute(
-            select(Product.id).where(Product.id == product_id)
-        )
-        
-        if not product_exists.scalar_one_or_none():
-            self.logger.warning(f"Продукт с ID:{product_id} не существует в базе данных")
-            return
-        
-        # Удаляем существующие связи
-        stmt = delete(product_categories).where(product_categories.c.product_id == product_id)
-        await db.execute(stmt)
-        
-        # Выбираем первую категорию как основную
-        primary_category_id = next(iter(category_ids))
-        
-        # Добавляем новые связи
-        for category_id in category_ids:
-            values = {
-                'product_id': product_id,
-                'category_id': category_id
-            }
-            
-            # Если таблица поддерживает флаг is_primary
-            if hasattr(product_categories.c, 'is_primary'):
-                values['is_primary'] = (category_id == primary_category_id)
-                
-            stmt = insert(product_categories).values(**values)
-            await db.execute(stmt)
-    
-    async def classify_and_update_product(self, db: AsyncSession, product_id: int, text_to_analyze: str, category_map: Dict[str, Dict]) -> None:
-        """Классифицирует продукт и обновляет его категории"""
-        category_ids = await self.classify_product(db, product_id, text_to_analyze, category_map)
-        
-        if category_ids:
-            await self.add_product_to_categories(db, product_id, category_ids)
-    
     async def update_category_counters(self, db: AsyncSession) -> None:
         """Обновляет счетчики товаров для всех категорий"""
         self.logger.info("Обновление счетчиков товаров в категориях...")
@@ -589,53 +327,273 @@ class BaseScraper:
         await db.commit()
         self.logger.info("Счетчики товаров в категориях обновлены")
 
-
-    async def ensure_products_in_default_category(self, db: AsyncSession, brand_id: int) -> None:
-        """
-        Проверяет, что все товары бренда находятся в категории 'все двери'
-        и добавляет их туда, если нет
-        """
-        # Получаем категорию "все двери"
-        default_category = await self.get_or_create_default_category(db, brand_id)
-        default_category_id = default_category.id
-        
-        # Получаем все товары бренда
-        products_result = await db.execute(
-            select(Product).where(Product.brand_id == brand_id)
-        )
-        products = products_result.scalars().all()
-        
-        # Проверяем для каждого товара
-        added_count = 0
-        for product in products:
-            # Проверяем, есть ли товар в категории "все двери"
-            result = await db.execute(
-                select(func.count()).select_from(product_categories).where(
-                    product_categories.c.product_id == product.id,
-                    product_categories.c.category_id == default_category_id
-                )
-            )
-            count = result.scalar_one()
-            
-            # Если товара нет в категории "все двери", добавляем
-            if count == 0:
-                values = {
-                    'product_id': product.id,
-                    'category_id': default_category_id
-                }
-                
-                # Если таблица поддерживает флаг is_primary
-                if hasattr(product_categories.c, 'is_primary'):
-                    values['is_primary'] = True
-                    
-                stmt = insert(product_categories).values(**values)
-                await db.execute(stmt)
-                added_count += 1
-        
-        if added_count > 0:
-            await db.flush()
-            self.logger.info(f"Добавлено {added_count} товаров в категорию 'все двери'")
+    # ---------- Динамические методы работы с категориями ----------
     
+    async def get_all_categories_from_db(self, db: AsyncSession) -> Dict[str, Dict]:
+        """
+        Получает все активные категории из базы данных
+        Категории общие для всех брендов, бренд устанавливается только для продуктов
+        
+        Args:
+            db: Сессия базы данных
+            
+        Returns:
+            Dict[str, Dict]: Словарь категорий с их данными
+        """
+        result = await db.execute(
+            select(Category).where(Category.is_active == True)
+        )
+        categories = result.scalars().all()
+        
+        category_map = {}
+        for category in categories:
+            # Генерируем ключевые слова из названия категории и её атрибутов
+            keywords = self._generate_category_keywords(category)
+            
+            category_map[category.name.lower()] = {
+                'id': category.id,
+                'name': category.name,
+                'slug': category.slug,
+                'keywords': keywords,
+                'is_default': self._is_default_category(category.name)
+            }
+        
+        self.logger.info(f"Загружено {len(category_map)} общих категорий для классификации")
+        
+        # Логируем категории для отладки
+        for name, data in category_map.items():
+            keywords_preview = data['keywords'][:3] if len(data['keywords']) > 3 else data['keywords']
+            self.logger.debug(f"Категория '{name}': keywords={keywords_preview}...")
+        
+        return category_map
+    
+    def _generate_category_keywords(self, category: Category) -> List[str]:
+        """
+        Генерирует ключевые слова для категории на основе её данных
+        
+        Args:
+            category: Объект категории
+            
+        Returns:
+            List[str]: Список ключевых слов
+        """
+        keywords = set()
+        
+        # Добавляем само название категории
+        keywords.add(category.name.lower())
+        
+        # Разбиваем название на отдельные слова
+        name_words = category.name.lower().split()
+        keywords.update(name_words)
+        
+        # Добавляем slug (если есть)
+        if hasattr(category, 'slug') and category.slug:
+            slug_words = category.slug.replace('-', ' ').split()
+            keywords.update(slug_words)
+        
+        # Добавляем мета-ключевые слова (если есть)
+        if hasattr(category, 'meta_keywords') and category.meta_keywords:
+            meta_words = [kw.strip().lower() for kw in category.meta_keywords.split(',')]
+            keywords.update(meta_words)
+        
+        # Специальные правила для разных типов категорий
+        category_name_lower = category.name.lower()
+        
+        if 'металлические' in category_name_lower or 'металлическая' in category_name_lower:
+            keywords.update(['металл', 'стальные', 'стальная', 'железные', 'железная'])
+        
+        if 'входные' in category_name_lower or 'входная' in category_name_lower:
+            keywords.update(['уличная', 'наружная', 'внешняя', 'фасадная'])
+        
+        if 'межкомнатные' in category_name_lower or 'межкомнатная' in category_name_lower:
+            keywords.update(['внутренняя', 'комнатная', 'интерьерная'])
+        
+        if 'деревянные' in category_name_lower or 'деревянная' in category_name_lower:
+            keywords.update(['дерево', 'древесина', 'массив', 'шпон'])
+        
+        if 'стеклянные' in category_name_lower or 'стеклянная' in category_name_lower:
+            keywords.update(['стекло', 'остекленные', 'остекленная'])
+        
+        if 'белые' in category_name_lower or 'белая' in category_name_lower:
+            keywords.update(['белый', 'белого цвета', 'светлые', 'светлая'])
+        
+        if 'черные' in category_name_lower or 'черная' in category_name_lower:
+            keywords.update(['черный', 'черного цвета', 'темные', 'темная'])
+        
+        # Убираем пустые строки и очень короткие слова
+        keywords = {kw for kw in keywords if kw and len(kw) > 1}
+        
+        return list(keywords)
+    
+    def _is_default_category(self, category_name: str) -> bool:
+        """
+        Определяет, является ли категория категорией по умолчанию
+        
+        Args:
+            category_name: Название категории
+            
+        Returns:
+            bool: True если это категория по умолчанию
+        """
+        default_names = ['все двери', 'все товары', 'общие', 'основные', 'default']
+        return any(default in category_name.lower() for default in default_names)
+    
+    async def get_default_category(self, db: AsyncSession) -> Optional[Category]:
+        """
+        Получает общую категорию "Все двери"
+        Категории общие для всех брендов
+        
+        Args:
+            db: Сессия базы данных
+            
+        Returns:
+            Category или None
+        """
+        # Приоритет 1: Ищем "Все двери"
+        result = await db.execute(
+            select(Category).where(
+                func.lower(Category.name).like('%все двери%'),
+                Category.is_active == True
+            )
+        )
+        category = result.scalar_one_or_none()
+        if category:
+            return category
+        
+        # Приоритет 2: Ищем любую дефолтную категорию
+        result = await db.execute(
+            select(Category).where(
+                or_(
+                    func.lower(Category.name).like('%все товары%'),
+                    func.lower(Category.name).like('%общие%'),
+                    func.lower(Category.name).like('%основные%'),
+                    func.lower(Category.name).like('%default%')
+                ),
+                Category.is_active == True
+            )
+        )
+        category = result.scalar_one_or_none()
+        if category:
+            return category
+        
+        # Приоритет 3: Ищем первую активную категорию
+        result = await db.execute(
+            select(Category).where(Category.is_active == True).limit(1)
+        )
+        return result.scalar_one_or_none()
+    
+    async def classify_product_to_categories(self, 
+                                           product_text: str, 
+                                           all_categories: Dict[str, Dict],
+                                           min_matches: int = 1) -> List[Dict]:
+        """
+        Классифицирует продукт по категориям на основе текста
+        
+        Args:
+            product_text: Полный текст продукта для анализа
+            all_categories: Все доступные категории с ключевыми словами
+            min_matches: Минимальное количество совпадений для включения в категорию
+            
+        Returns:
+            List[Dict]: Список подходящих категорий с весами
+        """
+        text_lower = product_text.lower()
+        matched_categories = []
+        
+        for category_name, category_data in all_categories.items():
+            # Пропускаем категорию "все двери" - она обрабатывается отдельно
+            if category_data.get('is_default', False):
+                continue
+            
+            keywords = category_data.get('keywords', [])
+            if not keywords:
+                continue
+            
+            matches = 0
+            matched_keywords = []
+            total_weight = 0
+            
+            for keyword in keywords:
+                if keyword in text_lower:
+                    matches += 1
+                    matched_keywords.append(keyword)
+                    
+                    # Вес зависит от длины ключевого слова
+                    word_weight = len(keyword.split()) * 1.0
+                    
+                    # Бонус за точное совпадение фразы
+                    if len(keyword.split()) > 1:
+                        word_weight *= 1.5
+                    
+                    total_weight += word_weight
+            
+            # Если достаточно совпадений, добавляем категорию
+            if matches >= min_matches:
+                matched_categories.append({
+                    'id': category_data['id'],
+                    'name': category_data['name'],
+                    'slug': category_data['slug'],
+                    'weight': total_weight,
+                    'matches': matches,
+                    'matched_keywords': matched_keywords
+                })
+        
+        # Сортируем по весу (по убыванию)
+        matched_categories.sort(key=lambda x: x['weight'], reverse=True)
+        
+        return matched_categories
+    
+    async def assign_product_to_all_categories(self, 
+                                             db: AsyncSession, 
+                                             product_id: int,
+                                             default_category_id: int,
+                                             additional_categories: List[Dict]) -> None:
+        """
+        Назначает продукт в категорию "Все двери" и дополнительные категории
+        
+        Args:
+            db: Сессия базы данных
+            product_id: ID продукта
+            default_category_id: ID категории "Все двери"
+            additional_categories: Дополнительные категории для назначения
+        """
+        # Удаляем все существующие связи продукта с категориями
+        stmt = delete(product_categories).where(product_categories.c.product_id == product_id)
+        await db.execute(stmt)
+        
+        assigned_categories = []
+        
+        # 1. ОБЯЗАТЕЛЬНО добавляем в категорию "Все двери"
+        await self.add_product_to_category(db, product_id, default_category_id, is_primary=True)
+        assigned_categories.append(default_category_id)
+        
+        self.logger.info(f"Продукт {product_id} добавлен в основную категорию 'Все двери' (ID: {default_category_id})")
+        
+        # 2. Добавляем в дополнительные категории
+        for category_info in additional_categories:
+            category_id = category_info['id']
+            
+            # Пропускаем, если это та же категория, что и основная
+            if category_id == default_category_id:
+                continue
+            
+            # Пропускаем, если уже добавлен
+            if category_id in assigned_categories:
+                continue
+            
+            await self.add_product_to_category(db, product_id, category_id, is_primary=False)
+            assigned_categories.append(category_id)
+            
+            self.logger.info(
+                f"Продукт {product_id} добавлен в дополнительную категорию '{category_info['name']}' "
+                f"(вес: {category_info['weight']:.2f}, совпадений: {category_info['matches']}, "
+                f"ключевые слова: {', '.join(category_info['matched_keywords'][:3])})"
+            )
+        
+        await db.flush()
+        
+        self.logger.info(f"Продукт {product_id} назначен в {len(assigned_categories)} категорий")
+
     # ---------- Основной метод парсинга ----------
     
     async def parse_multiple_catalogs(self, catalog_urls: List[str], db: AsyncSession) -> int:

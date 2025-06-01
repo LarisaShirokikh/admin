@@ -3,11 +3,10 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from pydantic import BaseModel, HttpUrl
 from typing import List, Optional
 from app.core.database import AsyncSessionLocal
-from app.deps import get_db
 from app.worker.tasks import (
+    scrape_bunker_doors_multiple_catalogs_task,
     scrape_intecron_multiple_catalogs_task, 
     scrape_labirint_multiple_catalogs_task, 
-    scrape_labirint_task,
     scrape_as_doors_multiple_catalogs_task
 )
 router = APIRouter()
@@ -29,16 +28,11 @@ class ScraperStatus(BaseModel):
     result: Optional[dict] = None
     error: Optional[str] = None
 
-@router.post("/scrape-catalogs", response_model=ScraperResponse)
+@router.post("/scrape-labirint", response_model=ScraperResponse)
 async def scrape_catalogs(request: ScraperRequest):
     """
     Запускает задачу парсинга нескольких каталогов Лабиринт.
     
-    Args:
-        request: Данные запроса с URL каталогов
-        
-    Returns:
-        ID задачи Celery и сообщение
     """
     if not request.catalog_urls:
         raise HTTPException(status_code=400, detail="Необходимо указать хотя бы один URL каталога")
@@ -51,25 +45,29 @@ async def scrape_catalogs(request: ScraperRequest):
         message=f"Задача парсинга {len(request.catalog_urls)} каталогов запущена успешно"
     )
 
-@router.post("/scrape-labirint", response_model=ScraperResponse)
-async def scrape_labirint(catalog_url: Optional[str] = None):
+@router.post("/scrape-bunker-doors", response_model=ScraperResponse)
+async def scrape_bunker_doors_catalogs(request: ScraperRequest):
     """
-    Запускает задачу парсинга одного каталога Лабиринт.
-    Для обратной совместимости.
+    Запускает задачу парсинга нескольких каталогов Bunker Doors.
     
-    Args:
-        catalog_url: URL каталога (опционально, по умолчанию используется leolab)
-        
-    Returns:
-        ID задачи Celery и сообщение
+    Логика работы:
+    - Все продукты автоматически получают бренд "Bunker Doors"
+    - Все продукты обязательно помещаются в категорию "Все двери"
+    - Дополнительно продукты распределяются по подходящим категориям из БД
+    - Категории общие для всех брендов
     """
+    if not request.catalog_urls:
+        raise HTTPException(status_code=400, detail="Необходимо указать хотя бы один URL каталога")
+    
     # Запускаем задачу Celery
-    task = scrape_labirint_task.delay()
+    task = scrape_bunker_doors_multiple_catalogs_task.delay(request.catalog_urls)
     
     return ScraperResponse(
         task_id=task.id,
-        message=f"Задача парсинга каталога запущена успешно"
+        message=f"Задача парсинга {len(request.catalog_urls)} каталогов Bunker Doors запущена. "
+               f"Все продукты будут помещены в 'Все двери' + автоматически распределены по подходящим категориям."
     )
+
 
 @router.post("/scrape-intecron", response_model=ScraperResponse)
 async def scrape_intecron_catalogs(request: ScraperRequest):
