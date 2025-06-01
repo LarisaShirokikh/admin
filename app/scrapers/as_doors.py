@@ -2,7 +2,7 @@
 Скрапер для сайта АС-Двери
 """
 import json
-from typing import List, Dict, Any, Optional
+from typing import List
 import logging
 from bs4 import BeautifulSoup
 from sqlalchemy import func, or_, select
