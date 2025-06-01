@@ -32,138 +32,68 @@ async def upload_video(
     db: AsyncSession = Depends(get_db)
 ):
     """Загрузка и обработка видео"""
-    logger.info(f"🎬 Начинаем загрузку видео: {file.filename}, размер: {file.size if hasattr(file, 'size') else 'неизвестно'}")
+    logger.info(f"🎬 Загрузка видео: {file.filename}")
     
+    # Проверки
+    allowed_formats = ['.mp4', '.mov', '.avi', '.mkv', '.webm']
+    file_extension = os.path.splitext(file.filename)[1].lower()
+    if file_extension not in allowed_formats:
+        raise HTTPException(400, f"Неподдерживаемый формат. Разрешены: {', '.join(allowed_formats)}")
+    
+    # Читаем файл
+    file_content = b""
+    max_size = 100 * 1024 * 1024  # 100MB
+    while True:
+        chunk = await file.read(1024 * 1024)  # 1MB chunks
+        if not chunk:
+            break
+        file_content += chunk
+        if len(file_content) > max_size:
+            raise HTTPException(400, "Файл слишком большой. Максимум: 100MB")
+    
+    # Создаем временный файл и обрабатываем
+    temp_path = None
     try:
-        # Проверяем формат файла
-        allowed_formats = ['.mp4', '.mov', '.avi', '.mkv', '.webm']
-        file_extension = os.path.splitext(file.filename)[1].lower()
-        
-        if file_extension not in allowed_formats:
-            logger.error(f"❌ Неподдерживаемый формат: {file_extension}")
-            raise HTTPException(400, f"Неподдерживаемый формат файла. Разрешены: {', '.join(allowed_formats)}")
-        
-        logger.info(f"✅ Формат файла проверен: {file_extension}")
-        
-        # Проверяем права доступа к директории media
-        media_dir = "/app/media"
-        if not os.path.exists(media_dir):
-            logger.error(f"❌ Директория {media_dir} не существует")
-            raise HTTPException(500, f"Директория {media_dir} не найдена")
-        
-        if not os.access(media_dir, os.W_OK):
-            logger.error(f"❌ Нет прав записи в директорию {media_dir}")
-            raise HTTPException(500, f"Нет прав записи в директорию {media_dir}")
-        
-        logger.info(f"✅ Права доступа к {media_dir} проверены")
-        
-        # Проверяем место на диске
-        import shutil
-        total, used, free = shutil.disk_usage(media_dir)
-        free_mb = free // (1024*1024)
-        logger.info(f"💾 Свободное место: {free_mb} MB")
-        
-        if free_mb < 500:  # Меньше 500MB
-            logger.error(f"❌ Недостаточно места на диске: {free_mb} MB")
-            raise HTTPException(500, "Недостаточно места на диске")
-        
-        # Читаем файл частями для контроля памяти
-        logger.info("📖 Начинаем чтение файла...")
-        file_content = b""
-        max_size = 100 * 1024 * 1024  # 100MB
-        chunk_size = 1024 * 1024  # 1MB chunks
-        
-        while True:
-            chunk = await file.read(chunk_size)
-            if not chunk:
-                break
-            file_content += chunk
-            
-            if len(file_content) > max_size:
-                logger.error(f"❌ Файл слишком большой: {len(file_content)} байт")
-                raise HTTPException(400, "Файл слишком большой. Максимальный размер: 100MB")
-        
-        logger.info(f"✅ Файл прочитан: {len(file_content)} байт")
-        
-        # Создаем временный файл
-        logger.info("📁 Создаем временный файл...")
-        temp_dir = tempfile.gettempdir()
-        logger.info(f"📁 Временная директория: {temp_dir}")
-        
-        with tempfile.NamedTemporaryFile(delete=False, suffix=file_extension, dir=temp_dir) as temp_file:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=file_extension) as temp_file:
             temp_file.write(file_content)
             temp_path = temp_file.name
         
-        logger.info(f"✅ Временный файл создан: {temp_path}")
+        # Обрабатываем видео (права устанавливаются внутри)
+        processing_result = video_processor.process_video(temp_path, file.filename)
         
-        try:
-            # Проверяем, что файл действительно создался
-            if not os.path.exists(temp_path):
-                logger.error(f"❌ Временный файл не создался: {temp_path}")
-                raise HTTPException(500, "Ошибка создания временного файла")
-            
-            temp_size = os.path.getsize(temp_path)
-            logger.info(f"✅ Размер временного файла: {temp_size} байт")
-            
-            # Обрабатываем видео
-            logger.info("🔄 Начинаем обработку видео...")
-            processing_result = video_processor.process_video(temp_path, file.filename)
-            logger.info(f"✅ Видео обработано: {processing_result}")
-            
-            # Ищем продукт для привязки
-            product_id = None
-            if product_title:
-                logger.info(f"🔍 Ищем продукт: {product_title}")
-                product = await find_product_by_title(db, product_title)
-                if product:
-                    product_id = product.id
-                    logger.info(f"✅ Продукт найден: {product_id}")
-                else:
-                    logger.info("❌ Продукт не найден")
-            
-            # Создаем запись в базе данных
-            logger.info("💾 Сохраняем в базу данных...")
-            video_data = VideoCreate(
-                title=title,
-                description=description,
-                url=processing_result["video_path"],
-                thumbnail_url=processing_result["thumbnail_path"],
-                duration=processing_result["duration"],
-                product_id=product_id,
-                is_active=True,
-                is_featured=is_featured
-            )
-            
-            video = await create_video(db, video_data)
-            logger.info(f"✅ Видео сохранено в БД: ID {video.id}")
-            
-            # Если продукт не найден, пытаемся автоматически привязать
-            if not product_id:
-                logger.info("🔗 Пытаемся автоматически привязать к продукту...")
-                video = await auto_link_video_to_product(db, video.id)
-            
-            logger.info(f"🎉 Загрузка видео завершена успешно: {video.id}")
-            return video
-            
-        except Exception as e:
-            logger.error(f"❌ Ошибка обработки видео: {str(e)}", exc_info=True)
-            raise HTTPException(500, f"Ошибка обработки видео: {str(e)}")
+        # УБРАЛИ ВЫЗОВ fix_file_permissions - права уже установлены!
         
-        finally:
-            # Удаляем временный файл
-            if os.path.exists(temp_path):
-                try:
-                    os.unlink(temp_path)
-                    logger.info(f"🗑️ Временный файл удален: {temp_path}")
-                except Exception as e:
-                    logger.warning(f"⚠️ Не удалось удалить временный файл {temp_path}: {e}")
-            
-    except HTTPException:
-        # Переиспользуем HTTP исключения как есть
-        raise
-    except Exception as e:
-        logger.error(f"❌ Неожиданная ошибка при загрузке видео: {str(e)}", exc_info=True)
-        raise HTTPException(500, f"Неожиданная ошибка: {str(e)}")
+        # Ищем продукт
+        product_id = None
+        if product_title:
+            product = await find_product_by_title(db, product_title)
+            if product:
+                product_id = product.id
+        
+        # Сохраняем в БД
+        video_data = VideoCreate(
+            title=title,
+            description=description,
+            url=processing_result["video_path"],
+            thumbnail_url=processing_result["thumbnail_path"],
+            duration=processing_result["duration"],
+            product_id=product_id,
+            is_active=True,
+            is_featured=is_featured
+        )
+        
+        video = await create_video(db, video_data)
+        
+        # Автопривязка к продукту
+        if not product_id:
+            video = await auto_link_video_to_product(db, video.id)
+        
+        logger.info(f"✅ Видео загружено: ID {video.id}")
+        return video
+        
+    finally:
+        if temp_path and os.path.exists(temp_path):
+            os.unlink(temp_path)
 
 # Добавим эндпоинт для проверки состояния системы
 @router.get("/system-check")
