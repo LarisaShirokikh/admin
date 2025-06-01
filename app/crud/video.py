@@ -59,6 +59,23 @@ class VideoProcessor:
             print(f"Ошибка обработки видео: {e}")
             # Если обработка не удалась, просто копируем оригинал
             return self._fallback_processing(input_path, original_filename)
+        
+    def fix_file_permissions(processing_result: dict) -> None:
+        """Исправление прав доступа к созданным файлам"""
+        try:
+            # Исправляем права к видеофайлу
+            video_file_path = os.path.join("/app/media", processing_result["video_path"].lstrip("/"))
+            if os.path.exists(video_file_path):
+                os.chmod(video_file_path, 0o644)
+            
+            # Исправляем права к thumbnail если есть
+            if processing_result.get("thumbnail_path"):
+                thumbnail_file_path = os.path.join("/app/media", processing_result["thumbnail_path"].lstrip("/"))
+                if os.path.exists(thumbnail_file_path):
+                    os.chmod(thumbnail_file_path, 0o644)
+                    
+        except Exception as e:
+            print(f"Не удалось установить права доступа: {e}")
 
     def _compress_video(self, input_path: str, output_path: str) -> Optional[float]:
         """
@@ -158,6 +175,23 @@ class VideoProcessor:
 
 
 # CRUD функции для работы с видео
+def fix_file_permissions(processing_result: dict) -> None:
+        """Исправление прав доступа к созданным файлам"""
+        try:
+            # Исправляем права к видеофайлу
+            video_file_path = os.path.join("/app/media", processing_result["video_path"].lstrip("/"))
+            if os.path.exists(video_file_path):
+                os.chmod(video_file_path, 0o644)
+            
+            # Исправляем права к thumbnail если есть
+            if processing_result.get("thumbnail_path"):
+                thumbnail_file_path = os.path.join("/app/media", processing_result["thumbnail_path"].lstrip("/"))
+                if os.path.exists(thumbnail_file_path):
+                    os.chmod(thumbnail_file_path, 0o644)
+                    
+        except Exception as e:
+            print(f"Не удалось установить права доступа: {e}")
+            
 async def create_video(db: AsyncSession, video_data: VideoCreate) -> Video:
     """Создание нового видео"""
     video = Video(**video_data.dict())
