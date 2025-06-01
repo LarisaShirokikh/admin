@@ -3,6 +3,7 @@ import tempfile
 import os
 import logging
 from typing import List, Optional
+import uuid
 from fastapi import APIRouter, UploadFile, File, HTTPException, Depends, BackgroundTasks, Query, Form
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -31,7 +32,7 @@ async def upload_video(
     is_featured: bool = Form(False),
     db: AsyncSession = Depends(get_db)
 ):
-    """Загрузка и обработка видео"""
+    """Загрузка видео - БЫСТРАЯ версия"""
     logger.info(f"🎬 Загрузка видео: {file.filename}")
     
     # Проверки
@@ -40,27 +41,41 @@ async def upload_video(
     if file_extension not in allowed_formats:
         raise HTTPException(400, f"Неподдерживаемый формат. Разрешены: {', '.join(allowed_formats)}")
     
-    # Читаем файл
-    file_content = b""
-    max_size = 100 * 1024 * 1024  # 100MB
-    while True:
-        chunk = await file.read(1024 * 1024)  # 1MB chunks
-        if not chunk:
-            break
-        file_content += chunk
-        if len(file_content) > max_size:
-            raise HTTPException(400, "Файл слишком большой. Максимум: 100MB")
+    # ПРЯМАЯ запись в финальное место без временных файлов
+    file_uuid = str(uuid.uuid4())
+    base_name = os.path.splitext(file.filename)[0]
+    output_filename = f"{file_uuid}_{base_name}.mp4"
+    final_path = f"/app/media/videos/{output_filename}"
     
-    # Создаем временный файл и обрабатываем
-    temp_path = None
     try:
-        with tempfile.NamedTemporaryFile(delete=False, suffix=file_extension) as temp_file:
-            temp_file.write(file_content)
-            temp_path = temp_file.name
+        # Создаем директорию если не существует
+        os.makedirs("/app/media/videos", exist_ok=True)
         
-        # Обрабатываем видео (права устанавливаются внутри)
-        processing_result = video_processor.process_video(temp_path, file.filename)
+        # ПОТОКОВАЯ запись напрямую в финальный файл
+        total_size = 0
+        max_size = 100 * 1024 * 1024  # 100MB
         
+        with open(final_path, "wb") as f:
+            while True:
+                chunk = await file.read(1024 * 1024)  # 1MB chunk
+                if not chunk:
+                    break
+                
+                total_size += len(chunk)
+                if total_size > max_size:
+                    # Удаляем файл если превышен размер
+                    os.unlink(final_path)
+                    raise HTTPException(400, "Файл слишком большой. Максимум: 100MB")
+                
+                f.write(chunk)
+        
+        # Устанавливаем права
+        try:
+            import subprocess
+            subprocess.run(['chmod', '644', final_path], check=True)
+            logger.info(f"🔧 Права установлены: {final_path}")
+        except Exception as e:
+            logger.warning(f"⚠️ Не удалось установить права: {e}")
         
         # Ищем продукт
         product_id = None
@@ -73,9 +88,9 @@ async def upload_video(
         video_data = VideoCreate(
             title=title,
             description=description,
-            url=processing_result["video_path"],
-            thumbnail_url=processing_result["thumbnail_path"],
-            duration=processing_result["duration"],
+            url=f"/media/videos/{output_filename}",
+            thumbnail_url=None,
+            duration=None,
             product_id=product_id,
             is_active=True,
             is_featured=is_featured
@@ -88,19 +103,19 @@ async def upload_video(
             video = await auto_link_video_to_product(db, video.id)
         
         logger.info(f"✅ Видео загружено: ID {video.id}")
-        try:
-            import subprocess
-            video_full_path = f"/app/{processing_result['video_path']}"
-            subprocess.run(['chmod', '644', video_full_path], check=True)
-            logger.info(f"🔧 Права исправлены для: {video_full_path}")
-        except Exception as e:
-            logger.warning(f"⚠️ Не удалось исправить права: {e}")
-        
         return video
         
-    finally:
-        if temp_path and os.path.exists(temp_path):
-            os.unlink(temp_path)
+    except HTTPException:
+        # Удаляем файл при ошибке
+        if os.path.exists(final_path):
+            os.unlink(final_path)
+        raise
+    except Exception as e:
+        # Удаляем файл при ошибке
+        if os.path.exists(final_path):
+            os.unlink(final_path)
+        logger.error(f"❌ Ошибка загрузки: {str(e)}")
+        raise HTTPException(500, f"Ошибка загрузки: {str(e)}")
 
 # Добавим эндпоинт для проверки состояния системы
 @router.get("/system-check")
