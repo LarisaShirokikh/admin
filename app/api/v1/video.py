@@ -61,7 +61,6 @@ async def upload_video(
         # Обрабатываем видео (права устанавливаются внутри)
         processing_result = video_processor.process_video(temp_path, file.filename)
         
-        # УБРАЛИ ВЫЗОВ fix_file_permissions - права уже установлены!
         
         # Ищем продукт
         product_id = None
@@ -89,6 +88,14 @@ async def upload_video(
             video = await auto_link_video_to_product(db, video.id)
         
         logger.info(f"✅ Видео загружено: ID {video.id}")
+        try:
+            import subprocess
+            video_full_path = f"/app/media{processing_result['video_path']}"
+            subprocess.run(['chmod', '644', video_full_path], check=True)
+            logger.info(f"🔧 Права исправлены для: {video_full_path}")
+        except Exception as e:
+            logger.warning(f"⚠️ Не удалось исправить права: {e}")
+        
         return video
         
     finally:
