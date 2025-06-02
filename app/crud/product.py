@@ -9,7 +9,7 @@ from app.models import Product, ProductImage
 from app.models.catalog import Catalog
 from app.models.category import Category
 from app.models.brand import Brand
-from app.schemas.product import ProductCreate
+from app.schemas.product import ProductCreate, ProductUpdate
 from app.schemas.product_image import ProductImageCreate
 from app.utils.text_utils import generate_slug
 from sqlalchemy.orm import selectinload
@@ -265,15 +265,7 @@ async def get_product_by_title(db: AsyncSession, title: str):
     return result.scalar_one_or_none()
 
 async def get_all_products(db: AsyncSession):
-    """
-    Получить все продукты.
     
-    Args:
-        db: Сессия базы данных
-        
-    Returns:
-        List[Product]: Список всех продуктов
-    """
     result = await db.execute(select(Product).options())
     return result.scalars().all()
 
@@ -583,3 +575,638 @@ async def update_product_images(db: AsyncSession, product_id: int, new_images: L
     
     # Создаем новые изображения
     await create_product_images(db, product_id, new_images)
+
+async def update_product(db: AsyncSession, product_id: int, product_update: "ProductUpdate") -> Optional[Product]:
+    """
+    Обновить продукт по ID (частичное обновление).
+    
+    Args:
+        db: Сессия базы данных
+        product_id: ID продукта
+        product_update: Данные для обновления (только указанные поля)
+        
+    Returns:
+        Optional[Product]: Обновленный продукт или None, если не найден
+    """
+    try:
+        # Получаем существующий продукт
+        stmt = (
+            select(Product)
+            .options(
+                selectinload(Product.product_images),
+                selectinload(Product.brand),
+                selectinload(Product.catalog),
+                selectinload(Product.categories)
+            )
+            .where(Product.id == product_id)
+        )
+        result = await db.execute(stmt)
+        product = result.scalar_one_or_none()
+        
+        if not product:
+            logger.warning(f"Продукт с ID {product_id} не найден")
+            return None
+        
+        # Получаем только те поля, которые были переданы для обновления
+        update_data = product_update.model_dump(exclude_unset=True)
+        
+        logger.info(f"Обновление продукта {product_id} с данными: {update_data}")
+        
+        # Обновляем только переданные поля
+        for field, value in update_data.items():
+            if field == 'images':
+                # Обработка изображений отдельно
+                if value is not None:
+                    await update_product_images(db, product_id, value)
+                continue
+            elif field == 'category_ids':
+                # Обработка категорий отдельно
+                if value is not None:
+                    await update_product_categories(db, product_id, value)
+                continue
+            elif field == 'price' and value is not None:
+                # Если обновляется price, пересчитываем discount_price если она не указана явно
+                if 'discount_price' not in update_data:
+                    new_price, new_discount_price = calculate_product_prices(value)
+                    product.price = new_price
+                    product.discount_price = new_discount_price
+                else:
+                    product.price = value
+                continue
+            
+            # Обновляем обычные поля
+            if hasattr(product, field) and value is not None:
+                setattr(product, field, value)
+        
+        # Генерируем slug, если имя изменилось, но slug не указан
+        if 'name' in update_data and 'slug' not in update_data and hasattr(product, 'slug'):
+            from app.utils.text_utils import generate_slug
+            new_slug = generate_slug(update_data['name'])
+            
+            # Проверяем уникальность slug
+            existing_slug_check = await db.execute(
+                select(Product.id).where(
+                    Product.slug == new_slug,
+                    Product.id != product_id
+                )
+            )
+            if not existing_slug_check.scalar_one_or_none():
+                product.slug = new_slug
+            else:
+                # Добавляем ID к slug для уникальности
+                product.slug = f"{new_slug}-{product_id}"
+        
+        db.add(product)
+        await db.flush()
+        await db.refresh(product)
+        
+        logger.info(f"Продукт {product_id} успешно обновлен")
+        return product
+        
+    except Exception as e:
+        logger.error(f"Ошибка при обновлении продукта {product_id}: {e}", exc_info=True)
+        await db.rollback()
+        raise
+
+async def delete_product(db: AsyncSession, product_id: int) -> bool:
+    """
+    Удалить продукт по ID.
+    
+    Args:
+        db: Сессия базы данных
+        product_id: ID продукта
+        
+    Returns:
+        bool: True если продукт был удален, False если не найден
+    """
+    try:
+        product = await get_product_by_id(db, product_id)
+        if not product:
+            return False
+        
+        # Удаляем связанные изображения
+        await db.execute(delete(ProductImage).where(ProductImage.product_id == product_id))
+        
+        # Удаляем сам продукт
+        await db.delete(product)
+        await db.flush()
+        
+        logger.info(f"Продукт {product_id} успешно удален")
+        return True
+        
+    except Exception as e:
+        logger.error(f"Ошибка при удалении продукта {product_id}: {e}", exc_info=True)
+        await db.rollback()
+        raise
+
+async def soft_delete_product(db: AsyncSession, product_id: int) -> Optional[Product]:
+    """
+    Мягкое удаление продукта (установка is_active = False).
+    
+    Args:
+        db: Сессия базы данных
+        product_id: ID продукта
+        
+    Returns:
+        Optional[Product]: Обновленный продукт или None, если не найден
+    """
+    try:
+        product = await get_product_by_id(db, product_id)
+        if not product:
+            return None
+        
+        product.is_active = False
+        db.add(product)
+        await db.flush()
+        await db.refresh(product)
+        
+        logger.info(f"Продукт {product_id} мягко удален (is_active = False)")
+        return product
+        
+    except Exception as e:
+        logger.error(f"Ошибка при мягком удалении продукта {product_id}: {e}", exc_info=True)
+        await db.rollback()
+        raise
+
+async def get_products_paginated(
+    db: AsyncSession,
+    skip: int = 0,
+    limit: int = 100,
+    search: Optional[str] = None,
+    brand_id: Optional[int] = None,
+    catalog_id: Optional[int] = None,
+    category_id: Optional[int] = None,
+    price_from: Optional[float] = None,
+    price_to: Optional[float] = None,
+    in_stock: Optional[bool] = None,
+    is_active: Optional[bool] = True,
+    sort_by: Optional[str] = "created_at",
+    sort_order: Optional[str] = "desc"
+) -> Tuple[List[Product], int]:
+    """
+    Получить продукты с пагинацией и фильтрацией.
+    
+    Returns:
+        Tuple[List[Product], int]: (список продуктов, общее количество)
+    """
+    try:
+        # Базовый запрос
+        query = select(Product).options(
+            selectinload(Product.brand),
+            selectinload(Product.catalog),
+            selectinload(Product.product_images)
+        )
+        
+        # Применяем фильтры
+        filters = []
+        
+        if is_active is not None:
+            filters.append(Product.is_active == is_active)
+        
+        if brand_id:
+            filters.append(Product.brand_id == brand_id)
+            
+        if catalog_id:
+            filters.append(Product.catalog_id == catalog_id)
+            
+        if price_from is not None:
+            filters.append(Product.price >= price_from)
+            
+        if price_to is not None:
+            filters.append(Product.price <= price_to)
+            
+        if in_stock is not None:
+            filters.append(Product.in_stock == in_stock)
+        
+        if search:
+            search_filter = f"%{search}%"
+            filters.append(
+                or_(
+                    Product.name.ilike(search_filter),
+                    Product.description.ilike(search_filter)
+                )
+            )
+        
+        if filters:
+            query = query.where(*filters)
+        
+        # Сортировка
+        if sort_by == "price":
+            order_field = Product.price
+        elif sort_by == "name":
+            order_field = Product.name
+        elif sort_by == "rating":
+            order_field = Product.rating
+        elif sort_by == "created_at":
+            order_field = Product.created_at
+        else:
+            order_field = Product.id
+        
+        if sort_order == "desc":
+            query = query.order_by(order_field.desc())
+        else:
+            query = query.order_by(order_field.asc())
+        
+        # Подсчет общего количества
+        count_query = select(func.count(Product.id))
+        if filters:
+            count_query = count_query.where(*filters)
+        
+        total_result = await db.execute(count_query)
+        total_count = total_result.scalar()
+        
+        # Пагинация
+        query = query.offset(skip).limit(limit)
+        
+        # Выполнение запроса
+        result = await db.execute(query)
+        products = list(result.scalars().all())
+        
+        return products, total_count
+        
+    except Exception as e:
+        logger.error(f"Ошибка при получении продуктов с пагинацией: {e}", exc_info=True)
+        raise
+
+async def update_product_categories(db: AsyncSession, product_id: int, category_ids: List[int]) -> None:
+    """
+    Обновить категории продукта.
+    
+    Args:
+        db: Сессия базы данных
+        product_id: ID продукта
+        category_ids: Список ID категорий
+    """
+    try:
+        # Получаем продукт
+        product = await get_product_by_id(db, product_id)
+        if not product:
+            raise ValueError(f"Продукт с ID {product_id} не найден")
+        
+        # Получаем категории
+        categories_result = await db.execute(
+            select(Category).where(Category.id.in_(category_ids))
+        )
+        categories = list(categories_result.scalars().all())
+        
+        # Обновляем связи
+        product.categories = categories
+        db.add(product)
+        await db.flush()
+        
+        logger.info(f"Категории продукта {product_id} обновлены: {category_ids}")
+        
+    except Exception as e:
+        logger.error(f"Ошибка при обновлении категорий продукта {product_id}: {e}", exc_info=True)
+        raise
+
+async def get_product_by_slug(db: AsyncSession, slug: str) -> Optional[Product]:
+    """
+    Получить продукт по slug.
+    
+    Args:
+        db: Сессия базы данных
+        slug: Slug продукта
+        
+    Returns:
+        Optional[Product]: Продукт или None, если не найден
+    """
+    try:
+        stmt = (
+            select(Product)
+            .options(
+                selectinload(Product.brand),
+                selectinload(Product.catalog),
+                selectinload(Product.product_images),
+                selectinload(Product.categories),
+                selectinload(Product.reviews)
+            )
+            .where(Product.slug == slug)
+        )
+        
+        result = await db.execute(stmt)
+        return result.scalar_one_or_none()
+        
+    except Exception as e:
+        logger.error(f"Ошибка при получении продукта по slug {slug}: {e}", exc_info=True)
+        raise
+
+async def get_products_count(
+    db: AsyncSession,
+    brand_id: Optional[int] = None,
+    catalog_id: Optional[int] = None,
+    is_active: Optional[bool] = True
+) -> int:
+    """
+    Получить количество продуктов с фильтрацией.
+    
+    Returns:
+        int: Количество продуктов
+    """
+    try:
+        query = select(func.count(Product.id))
+        
+        filters = []
+        if is_active is not None:
+            filters.append(Product.is_active == is_active)
+        if brand_id:
+            filters.append(Product.brand_id == brand_id)
+        if catalog_id:
+            filters.append(Product.catalog_id == catalog_id)
+        
+        if filters:
+            query = query.where(*filters)
+        
+        result = await db.execute(query)
+        return result.scalar()
+        
+    except Exception as e:
+        logger.error(f"Ошибка при подсчете продуктов: {e}", exc_info=True)
+        raise
+
+async def toggle_product_status(db: AsyncSession, product_id: int) -> Optional[Product]:
+    """
+    Переключить статус активности продукта.
+    
+    Args:
+        db: Сессия базы данных
+        product_id: ID продукта
+        
+    Returns:
+        Optional[Product]: Обновленный продукт или None, если не найден
+    """
+    try:
+        product = await get_product_by_id(db, product_id)
+        if not product:
+            return None
+        
+        product.is_active = not product.is_active
+        db.add(product)
+        await db.flush()
+        await db.refresh(product)
+        
+        logger.info(f"Статус продукта {product_id} изменен на: {product.is_active}")
+        return product
+        
+    except Exception as e:
+        logger.error(f"Ошибка при переключении статуса продукта {product_id}: {e}", exc_info=True)
+        await db.rollback()
+        raise
+
+async def get_product_by_id_with_relations(db: AsyncSession, product_id: int) -> Optional[Product]:
+    """
+    Получить продукт по ID с подгрузкой связанных объектов.
+    Связи: Brand, Catalog, Categories (many-to-many), ProductImages, Reviews
+    """
+    try:
+        stmt = (
+            select(Product)
+            .options(
+                selectinload(Product.brand),           # Product.brand_id -> Brand
+                selectinload(Product.catalog),         # Product.catalog_id -> Catalog
+                selectinload(Product.categories),      # Many-to-many с Category
+                selectinload(Product.product_images),  # One-to-many с ProductImage
+                selectinload(Product.reviews)          # One-to-many с Review
+            )
+            .where(Product.id == product_id)
+        )
+        
+        result = await db.execute(stmt)
+        return result.scalar_one_or_none()
+        
+    except Exception as e:
+        logger.error(f"Ошибка при получении продукта {product_id} с связями: {e}", exc_info=True)
+        raise
+
+async def get_product_by_slug_with_relations(db: AsyncSession, slug: str) -> Optional[Product]:
+    """
+    Получить продукт по slug с подгрузкой связанных объектов.
+    """
+    try:
+        stmt = (
+            select(Product)
+            .options(
+                selectinload(Product.brand),
+                selectinload(Product.catalog),
+                selectinload(Product.categories),
+                selectinload(Product.product_images),
+                selectinload(Product.reviews)
+            )
+            .where(Product.slug == slug)
+        )
+        
+        result = await db.execute(stmt)
+        return result.scalar_one_or_none()
+        
+    except Exception as e:
+        logger.error(f"Ошибка при получении продукта по slug {slug} с связями: {e}", exc_info=True)
+        raise
+
+async def get_products_paginated_with_relations(
+    db: AsyncSession,
+    skip: int = 0,
+    limit: int = 100,
+    search: Optional[str] = None,
+    brand_id: Optional[int] = None,
+    catalog_id: Optional[int] = None,
+    category_id: Optional[int] = None,
+    price_from: Optional[float] = None,
+    price_to: Optional[float] = None,
+    in_stock: Optional[bool] = None,
+    is_active: Optional[bool] = True,
+    sort_by: Optional[str] = "created_at",
+    sort_order: Optional[str] = "desc"
+) -> Tuple[List[Product], int]:
+    """
+    Получить продукты с пагинацией и подгрузкой связанных объектов.
+    """
+    try:
+        # Базовый запрос с подгрузкой связанных объектов
+        query = select(Product).options(
+            selectinload(Product.brand),
+            selectinload(Product.catalog),
+            selectinload(Product.categories),
+            selectinload(Product.product_images)
+        )
+        
+        # Применяем фильтры
+        filters = []
+        
+        if is_active is not None:
+            filters.append(Product.is_active == is_active)
+        
+        if brand_id:
+            filters.append(Product.brand_id == brand_id)
+            
+        if catalog_id:
+            filters.append(Product.catalog_id == catalog_id)
+            
+        if category_id:
+            # Фильтр по категориям через many-to-many связь
+            from app.models.attributes import product_categories
+            query = query.join(product_categories).filter(product_categories.c.category_id == category_id)
+            
+        if price_from is not None:
+            filters.append(Product.price >= price_from)
+            
+        if price_to is not None:
+            filters.append(Product.price <= price_to)
+            
+        if in_stock is not None:
+            filters.append(Product.in_stock == in_stock)
+        
+        if search:
+            search_filter = f"%{search}%"
+            filters.append(
+                or_(
+                    Product.name.ilike(search_filter),
+                    Product.description.ilike(search_filter)
+                )
+            )
+        
+        if filters:
+            query = query.where(*filters)
+        
+        # Сортировка
+        if sort_by == "price":
+            order_field = Product.price
+        elif sort_by == "name":
+            order_field = Product.name
+        elif sort_by == "rating":
+            order_field = Product.rating
+        elif sort_by == "created_at":
+            order_field = Product.created_at
+        else:
+            order_field = Product.id
+        
+        if sort_order == "desc":
+            query = query.order_by(order_field.desc())
+        else:
+            query = query.order_by(order_field.asc())
+        
+        # Подсчет общего количества (без подгрузки связей для производительности)
+        count_query = select(func.count(Product.id))
+        if category_id:
+            from app.models.attributes import product_categories
+            count_query = count_query.select_from(Product).join(product_categories).filter(product_categories.c.category_id == category_id)
+        if filters:
+            count_query = count_query.where(*filters)
+        
+        total_result = await db.execute(count_query)
+        total_count = total_result.scalar()
+        
+        # Пагинация
+        query = query.offset(skip).limit(limit)
+        
+        # Выполнение запроса
+        result = await db.execute(query)
+        products = list(result.scalars().all())
+        
+        return products, total_count
+        
+    except Exception as e:
+        logger.error(f"Ошибка при получении продуктов с связями: {e}", exc_info=True)
+        raise
+
+async def update_product_with_relations(db: AsyncSession, product_id: int, product_update: "ProductUpdate") -> Optional[Product]:
+    """
+    Обновить продукт по ID с возвратом полных связанных объектов.
+    """
+    try:
+        # Сначала обновляем продукт обычной функцией
+        updated_product = await update_product(db, product_id, product_update)
+        if not updated_product:
+            return None
+        
+        # Затем получаем его с полными связями
+        return await get_product_by_id_with_relations(db, product_id)
+        
+    except Exception as e:
+        logger.error(f"Ошибка при обновлении продукта {product_id} с связями: {e}", exc_info=True)
+        await db.rollback()
+        raise
+
+async def create_product_with_relations(db: AsyncSession, product_data: ProductCreate, auto_commit: bool = False) -> Optional[Product]:
+    """
+    Создать новый продукт с возвратом полных связанных объектов.
+    """
+    try:
+        # Создаем продукт обычной функцией
+        created_product = await create_product(db, product_data, auto_commit=False)
+        if not created_product:
+            return None
+        
+        if auto_commit:
+            await db.commit()
+        
+        # Получаем созданный продукт с полными связями
+        return await get_product_by_id_with_relations(db, created_product.id)
+        
+    except Exception as e:
+        logger.error(f"Ошибка при создании продукта с связями: {e}", exc_info=True)
+        await db.rollback()
+        raise
+
+async def get_all_products_filtered_with_relations(
+    db: AsyncSession,
+    brand_id: Optional[int] = None,
+    category_id: Optional[int] = None,
+    catalog_id: Optional[int] = None,
+    price_from: Optional[float] = None,
+    price_to: Optional[float] = None,
+) -> List[Product]:
+    """
+    Получить отфильтрованный список продуктов с подгрузкой связанных объектов.
+    """
+    try:
+        # Используем функцию с пагинацией, но без ограничений
+        products, _ = await get_products_paginated_with_relations(
+            db=db,
+            skip=0,
+            limit=10000,  # Большой лимит вместо отсутствия лимита
+            brand_id=brand_id,
+            category_id=category_id,
+            catalog_id=catalog_id,
+            price_from=price_from,
+            price_to=price_to
+        )
+        
+        return products
+        
+    except Exception as e:
+        logger.error(f"Ошибка при получении отфильтрованных продуктов с связями: {e}", exc_info=True)
+        raise
+
+def add_main_image_to_product(product: Product) -> None:
+    """
+    Добавляет поле main_image к продукту на основе его изображений.
+    """
+    if hasattr(product, 'product_images') and product.product_images:
+        # Ищем изображение помеченное как главное
+        main_img = next((img for img in product.product_images if getattr(img, 'is_main', False)), None)
+        product.main_image = main_img.url if main_img else product.product_images[0].url
+    else:
+        product.main_image = None
+
+async def get_all_products_with_relations(db: AsyncSession) -> List[Product]:
+    """
+    Получить все продукты с подгрузкой связанных объектов.
+    ВНИМАНИЕ: Может быть медленной на больших объемах данных!
+    """
+    try:
+        stmt = select(Product).options(
+            selectinload(Product.brand),
+            selectinload(Product.catalog),
+            selectinload(Product.categories),
+            selectinload(Product.product_images)
+        ).order_by(Product.created_at.desc())
+        
+        result = await db.execute(stmt)
+        products = list(result.scalars().all())
+        
+        logger.info(f"Получено {len(products)} продуктов с полными связями")
+        return products
+        
+    except Exception as e:
+        logger.error(f"Ошибка при получении всех продуктов с связями: {e}", exc_info=True)
+        raise

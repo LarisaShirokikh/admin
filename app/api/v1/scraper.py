@@ -45,26 +45,35 @@ async def scrape_catalogs(request: ScraperRequest):
         message=f"Задача парсинга {len(request.catalog_urls)} каталогов запущена успешно"
     )
 
-@router.post("/scrape-bunker-doors", response_model=ScraperResponse)
+@router.post("/scrape-bunker", response_model=ScraperResponse)
 async def scrape_bunker_doors_catalogs(request: ScraperRequest):
     """
-    Запускает задачу парсинга нескольких каталогов Bunker Doors.
-    
-    Логика работы:
-    - Все продукты автоматически получают бренд "Bunker Doors"
-    - Все продукты обязательно помещаются в категорию "Все двери"
-    - Дополнительно продукты распределяются по подходящим категориям из БД
-    - Категории общие для всех брендов
+    ИСПРАВЛЕНО: Запускает задачу парсинга нескольких каталогов Bunker Doors.
     """
     if not request.catalog_urls:
         raise HTTPException(status_code=400, detail="Необходимо указать хотя бы один URL каталога")
     
+    # Валидация URL каталогов
+    valid_urls = []
+    for url in request.catalog_urls:
+        url = url.strip()
+        if url:
+            # Нормализуем URL для Bunker Doors
+            if not url.startswith('http'):
+                if not url.startswith('/'):
+                    url = f"/{url}"
+                url = f"https://bunkerdoors.ru{url}"
+            valid_urls.append(url)
+    
+    if not valid_urls:
+        raise HTTPException(status_code=400, detail="После нормализации не осталось валидных URL")
+    
     # Запускаем задачу Celery
-    task = scrape_bunker_doors_multiple_catalogs_task.delay(request.catalog_urls)
+    task = scrape_bunker_doors_multiple_catalogs_task.delay(valid_urls)
     
     return ScraperResponse(
         task_id=task.id,
-        message=f"Задача парсинга {len(request.catalog_urls)} каталогов Bunker Doors запущена. "
+        message=f"Задача парсинга {len(valid_urls)} каталогов бренда 'Бункер' запущена. "
                f"Все продукты будут помещены в 'Все двери' + автоматически распределены по подходящим категориям."
     )
 
@@ -74,11 +83,6 @@ async def scrape_intecron_catalogs(request: ScraperRequest):
     """
     Запускает задачу парсинга нескольких каталогов Интекрон.
     
-    Args:
-        request: Данные запроса с URL каталогов
-    
-    Returns:
-        ID задачи Celery и сообщение
     """
     if not request.catalog_urls:
         raise HTTPException(status_code=400, detail="Необходимо указать хотя бы один URL каталога")
@@ -117,11 +121,6 @@ async def scrape_as_doors_catalogs(request: ScraperRequest):
     """
     Запускает задачу парсинга нескольких каталогов AS-Doors.
     
-    Args:
-        request: Данные запроса с URL каталогов
-    
-    Returns:
-        ID задачи Celery и сообщение
     """
     if not request.catalog_urls:
         raise HTTPException(status_code=400, detail="Необходимо указать хотя бы один URL каталога")
@@ -152,12 +151,6 @@ async def scrape_as_doors_catalogs(request: ScraperRequest):
 async def get_scraper_status(task_id: str):
     """
     Проверяет статус задачи парсинга.
-    
-    Args:
-        task_id: ID задачи Celery
-        
-    Returns:
-        Статус задачи и детали
     """
     # Импортируем здесь, чтобы избежать циклических импортов
     from celery.result import AsyncResult

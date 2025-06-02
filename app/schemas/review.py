@@ -1,27 +1,48 @@
 # app/schemas/review.py
+from pydantic import BaseModel, Field, ConfigDict
 from typing import Optional
-from pydantic import BaseModel, Field
+from datetime import datetime
 
 class ReviewBase(BaseModel):
-    product_id: int
-    author_name: str
-    rating: float = Field(..., ge=0, le=5)
-    text: Optional[str] = None
-    is_approved: int = 0
+    """Базовая схема отзыва"""
+    rating: int = Field(..., ge=1, le=5, description="Рейтинг от 1 до 5")
+    comment: Optional[str] = Field(None, description="Текст отзыва")
+    reviewer_name: Optional[str] = Field(None, description="Имя автора отзыва")
+    reviewer_email: Optional[str] = Field(None, description="Email автора отзыва")
+    is_verified: bool = Field(False, description="Подтвержден ли отзыв")
+    is_active: bool = Field(True, description="Активен ли отзыв")
 
 class ReviewCreate(ReviewBase):
-    pass
+    """Схема для создания отзыва"""
+    product_id: int = Field(..., description="ID продукта")
 
 class ReviewUpdate(BaseModel):
-    author_name: Optional[str] = None
-    rating: Optional[float] = Field(None, ge=0, le=5)
-    text: Optional[str] = None
-    is_approved: Optional[int] = None
+    """Схема для обновления отзыва"""
+    rating: Optional[int] = Field(None, ge=1, le=5)
+    comment: Optional[str] = None
+    reviewer_name: Optional[str] = None
+    reviewer_email: Optional[str] = None
+    is_verified: Optional[bool] = None
+    is_active: Optional[bool] = None
 
 class Review(ReviewBase):
+    """Схема отзыва"""
+    model_config = ConfigDict(from_attributes=True)
+    
     id: int
-    created_at: Optional[str] = None
-    updated_at: Optional[str] = None
+    product_id: int
+    created_at: datetime
+    updated_at: Optional[datetime] = None
 
-    class Config:
-        orm_mode = True
+class ReviewResponse(Review):
+    """Схема для ответа с отзывом"""
+    pass
+
+class ReviewBrief(BaseModel):
+    """Краткая информация об отзыве"""
+    model_config = ConfigDict(from_attributes=True)
+    
+    id: int
+    rating: int
+    reviewer_name: Optional[str] = None
+    created_at: datetime

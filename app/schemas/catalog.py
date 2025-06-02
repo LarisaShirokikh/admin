@@ -1,33 +1,50 @@
-# app/schemas/catalog.py (обновленная версия)
+# app/schemas/catalog.py (под вашу модель)
+from pydantic import BaseModel, Field, ConfigDict
 from typing import Optional
-from pydantic import BaseModel
+from datetime import datetime
 
 class CatalogBase(BaseModel):
-    name: str
-    category_id: int
+    """Базовая схема каталога"""
+    name: str = Field(..., min_length=1, max_length=255)
     description: Optional[str] = None
     image: Optional[str] = None
     is_active: bool = True
-    category_id: Optional[int] = None  # Делаем опциональным, т.к. теперь есть brand_id
-    brand_id: Optional[int] = None 
 
 class CatalogCreate(CatalogBase):
-    slug: Optional[str] = None
-
-
-class CatalogUpdate(BaseModel):
-    name: Optional[str] = None
+    """Схема для создания каталога"""
     slug: Optional[str] = None
     category_id: Optional[int] = None
-    description: Optional[str] = None
-    image: Optional[str] = None  # Добавлено поле для фото
-    is_active: Optional[bool] = None
+    brand_id: Optional[int] = None
 
-class Catalog(CatalogBase):
+class CatalogUpdate(BaseModel):
+    """Схема для обновления каталога"""
+    name: Optional[str] = Field(None, min_length=1, max_length=255)
+    slug: Optional[str] = None
+    description: Optional[str] = None
+    image: Optional[str] = None
+    is_active: Optional[bool] = None
+    category_id: Optional[int] = None
+    brand_id: Optional[int] = None
+
+class CatalogResponse(CatalogBase):
+    """Схема для ответа с каталогом"""
+    model_config = ConfigDict(from_attributes=True)
+    
     id: int
     slug: str
-    created_at: Optional[str] = None
-    updated_at: Optional[str] = None
+    category_id: Optional[int] = None
+    brand_id: Optional[int] = None
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
 
-    class Config:
-        orm_mode = True
+class CatalogBrief(BaseModel):
+    """Краткая информация о каталоге для связанных объектов"""
+    model_config = ConfigDict(from_attributes=True)
+    
+    id: int
+    name: str
+    slug: str
+    image: Optional[str] = None
+
+# Алиас для обратной совместимости
+Catalog = CatalogResponse

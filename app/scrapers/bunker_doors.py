@@ -10,6 +10,7 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.product import Product
+from app.models.catalog import Catalog
 from app.schemas.product import ProductCreate
 from app.schemas.product_image import ProductImageCreate
 from app.utils.text_utils import generate_slug, clean_text
@@ -21,8 +22,8 @@ logger = logging.getLogger("bunker_doors_scraper")
 class BunkerDoorsScraper(BaseScraper):
     def __init__(self):
         super().__init__(
-            brand_name="Bunker Doors",
-            brand_slug="bunker-doors",
+            brand_name="Бункер",
+            brand_slug="bunker",
             base_url="https://bunkerdoors.ru",
             logger_name="bunker_doors_scraper"
         )
@@ -89,11 +90,39 @@ class BunkerDoorsScraper(BaseScraper):
         self.logger.info(f"Извлечено {len(product_links)} ссылок на товары")
         return product_links
     
+    def get_pagination_urls(self, soup: BeautifulSoup, current_url: str) -> List[str]:
+        """
+        НОВОЕ: Извлекает URL страниц пагинации
+        """
+        pagination_urls = []
+        
+        # Ищем элементы пагинации
+        pagination_selectors = [
+            ".pagination a",
+            ".pages a", 
+            ".page-numbers a",
+            "a[href*='page']"
+        ]
+        
+        for selector in pagination_selectors:
+            links = soup.select(selector)
+            if links:
+                for link in links:
+                    href = link.get('href')
+                    if href and href != current_url:
+                        full_url = self.normalize_url(href)
+                        if full_url not in pagination_urls:
+                            pagination_urls.append(full_url)
+                break
+        
+        self.logger.info(f"Найдено {len(pagination_urls)} страниц пагинации")
+        return pagination_urls
+    
     def parse_product_page(self, product_url: str) -> Optional[Dict[str, Any]]:
         """
-        Парсит отдельную страницу товара и извлекает всю информацию
+        ИСПРАВЛЕНО: Парсит отдельную страницу товара с правильными селекторами
         """
-        self.logger.info(f"Парсинг страницы товара: {product_url}")
+        self.logger.debug(f"Парсинг страницы товара: {product_url}")
         
         html_content = self.get_html_content(product_url)
         if not html_content:
@@ -103,7 +132,6 @@ class BunkerDoorsScraper(BaseScraper):
         soup = BeautifulSoup(html_content, 'html.parser')
         
         try:
-            # Извлекаем основную информацию о товаре
             product_data = {
                 'url': product_url,
                 'name': '',
@@ -118,162 +146,120 @@ class BunkerDoorsScraper(BaseScraper):
                 'meta_description': ''
             }
             
-            # 1. Название товара
+            # 1. Название товара (ИСПРАВЛЕНО)
             title_selectors = [
                 "h1.product-01__title",
-                "h1",
-                ".product-title",
-                ".product-name"
+                ".product-title h1",
+                "h1"
             ]
             
             for selector in title_selectors:
                 title_elem = soup.select_one(selector)
                 if title_elem:
                     product_data['name'] = clean_text(title_elem.get_text())
-                    self.logger.info(f"Найдено название: {product_data['name']}")
+                    self.logger.debug(f"Найдено название: {product_data['name']}")
                     break
             
-            # 2. Цена товара
-            price_selectors = [
-                ".product-01__price",
-                ".price-current",
-                ".product-price",
-                "[class*='price']"
-            ]
-            
-            for selector in price_selectors:
-                price_elem = soup.select_one(selector)
-                if price_elem:
-                    price_text = price_elem.get_text(strip=True)
-                    product_data['price'] = self.extract_price_from_text(price_text)
-                    if product_data['price'] > 0:
-                        self.logger.info(f"Найдена цена: {product_data['price']}")
-                        break
+            # 2. Цена товара (ИСПРАВЛЕНО)
+            price_elem = soup.select_one(".product-01__price")
+            if price_elem:
+                price_text = price_elem.get_text(strip=True)
+                product_data['price'] = self.extract_price_from_text(price_text)
+                if product_data['price'] > 0:
+                    self.logger.debug(f"Найдена цена: {product_data['price']}")
             
             # 3. Старая цена (если есть скидка)
-            old_price_selectors = [
-                ".product-01__old-price",
-                ".price-old",
-                ".old-price"
-            ]
+            old_price_elem = soup.select_one(".product-01__old-price")
+            if old_price_elem:
+                old_price_text = old_price_elem.get_text(strip=True)
+                product_data['old_price'] = self.extract_price_from_text(old_price_text)
+                if product_data['old_price'] > 0:
+                    self.logger.debug(f"Найдена старая цена: {product_data['old_price']}")
             
-            for selector in old_price_selectors:
-                old_price_elem = soup.select_one(selector)
-                if old_price_elem:
-                    old_price_text = old_price_elem.get_text(strip=True)
-                    product_data['old_price'] = self.extract_price_from_text(old_price_text)
-                    if product_data['old_price'] > 0:
-                        self.logger.info(f"Найдена старая цена: {product_data['old_price']}")
-                        break
+            # 4. ИСПРАВЛЕНО: Описание из секции product-description
+            description_parts = []
             
-            # 4. Описание товара
-            description_selectors = [
-                ".product-01__description",
-                ".product-description",
-                ".product-info",
-                "[class*='description']"
-            ]
+            # Основное описание
+            desc_elem = soup.select_one(".product-description")
+            if desc_elem:
+                description_parts.append(clean_text(desc_elem.get_text()))
             
-            for selector in description_selectors:
-                desc_elem = soup.select_one(selector)
-                if desc_elem:
-                    product_data['description'] = clean_text(desc_elem.get_text())
-                    self.logger.info(f"Найдено описание: {len(product_data['description'])} символов")
-                    break
+            # Дополнительное описание из других секций
+            additional_desc = soup.select_one(".product-01__description")
+            if additional_desc:
+                description_parts.append(clean_text(additional_desc.get_text()))
             
-            # 5. Характеристики товара
+            product_data['description'] = " ".join(description_parts).strip()
+            
+            # 5. ИСПРАВЛЕНО: Характеристики из списка параметров
             characteristics = {}
             
-            # Способ 1: Таблица характеристик
-            char_table = soup.select_one(".product-01__parameters, .characteristics-table, .product-specs")
-            if char_table:
-                rows = char_table.select("tr, .parameter-row, .spec-row")
-                for row in rows:
-                    cells = row.select("td, .param-name, .param-value")
-                    if len(cells) >= 2:
-                        key = clean_text(cells[0].get_text())
-                        value = clean_text(cells[1].get_text())
-                        if key and value:
-                            characteristics[key] = value
-            
-            # Способ 2: Список характеристик
-            if not characteristics:
-                char_items = soup.select(".product-01__parameters-item, .characteristic-item")
-                for item in char_items:
-                    term_elem = item.select_one(".product-01__parameters-item-term, .char-name")
-                    desc_elem = item.select_one(".product-01__parameters-item-desc, .char-value")
-                    
-                    if term_elem and desc_elem:
-                        key = clean_text(term_elem.get_text())
-                        value = clean_text(desc_elem.get_text())
-                        if key and value:
-                            characteristics[key] = value
+            # Парсим характеристики из списка
+            param_items = soup.select(".product-01__parameters-item")
+            for item in param_items:
+                term_elem = item.select_one(".product-01__parameters-item-term")
+                desc_elem = item.select_one(".product-01__parameters-item-desc")
+                
+                if term_elem and desc_elem:
+                    key = clean_text(term_elem.get_text())
+                    value = clean_text(desc_elem.get_text())
+                    if key and value:
+                        characteristics[key] = value
             
             product_data['characteristics'] = characteristics
-            self.logger.info(f"Найдено {len(characteristics)} характеристик")
+            self.logger.debug(f"Найдено {len(characteristics)} характеристик")
             
-            # 6. Изображения товара
+            # 6. ИСПРАВЛЕНО: Изображения
             images = []
             
-            # Основное изображение
-            main_img_selectors = [
-                ".product-01__gallery img",
-                ".product-gallery img",
-                ".product-image img",
-                ".main-image img"
-            ]
-            
-            for selector in main_img_selectors:
-                img_elements = soup.select(selector)
-                for i, img in enumerate(img_elements):
-                    img_src = img.get('src') or img.get('data-src') or img.get('data-lazy')
-                    if img_src:
-                        full_img_url = self.normalize_url(img_src)
-                        if full_img_url not in images:
-                            images.append(full_img_url)
-                
-                if images:
-                    break
-            
-            # Дополнительные изображения в галерее
-            gallery_imgs = soup.select(".product-gallery__thumb img, .gallery-thumb img")
-            for img in gallery_imgs:
-                img_src = img.get('src') or img.get('data-src') or img.get('data-lazy')
-                if img_src:
-                    full_img_url = self.normalize_url(img_src)
-                    if full_img_url not in images:
+            # Главное изображение
+            main_image = soup.select_one(".product-gallery-04__stage-item-img-container")
+            if main_image:
+                img_url = main_image.get('href')
+                if img_url:
+                    full_img_url = self.normalize_url(img_url)
+                    if self.is_valid_image_url(full_img_url):
                         images.append(full_img_url)
             
+            # Дополнительные изображения из галереи
+            gallery_images = soup.select(".product-gallery-04__list-item img")
+            for img in gallery_images:
+                img_src = img.get('data-bc-lazy-path') or img.get('src')
+                if img_src:
+                    full_img_url = self.normalize_url(img_src)
+                    if self.is_valid_image_url(full_img_url) and full_img_url not in images:
+                        images.append(full_img_url)
+            
+            # Если не нашли изображения, ищем альтернативными способами
+            if not images:
+                alt_images = soup.select(".product-01 img, .product-gallery img")
+                for img in alt_images:
+                    img_src = img.get('src') or img.get('data-src')
+                    if img_src:
+                        full_img_url = self.normalize_url(img_src)
+                        if self.is_valid_image_url(full_img_url) and full_img_url not in images:
+                            images.append(full_img_url)
+            
             product_data['images'] = images
-            self.logger.info(f"Найдено {len(images)} изображений")
+            self.logger.debug(f"Найдено {len(images)} изображений")
             
             # 7. Артикул товара
-            article_selectors = [
-                ".product-01__article",
-                ".product-article",
-                ".sku"
-            ]
-            
-            for selector in article_selectors:
-                article_elem = soup.select_one(selector)
-                if article_elem:
-                    product_data['article'] = clean_text(article_elem.get_text())
-                    break
+            article_elem = soup.select_one(".product-01__article")
+            if article_elem:
+                article_text = clean_text(article_elem.get_text())
+                # Извлекаем только артикул из текста
+                article_match = re.search(r'([A-Za-z0-9\-]+)', article_text)
+                if article_match:
+                    product_data['article'] = article_match.group(1)
             
             # 8. Наличие товара
-            stock_indicators = [
-                ".in-stock", ".available", ".product-01__stock"
-            ]
+            in_stock = True
+            # Проверяем наличие индикаторов "нет в наличии"
+            page_text = soup.get_text().lower()
+            if any(phrase in page_text for phrase in ['нет в наличии', 'под заказ', 'недоступен']):
+                in_stock = False
             
-            out_of_stock_indicators = [
-                ".out-of-stock", ".not-available", ".sold-out"
-            ]
-            
-            # Проверяем наличие
-            for selector in out_of_stock_indicators:
-                if soup.select_one(selector):
-                    product_data['in_stock'] = False
-                    break
+            product_data['in_stock'] = in_stock
             
             # 9. Мета-информация
             title_tag = soup.select_one("title")
@@ -284,7 +270,7 @@ class BunkerDoorsScraper(BaseScraper):
             if meta_desc:
                 product_data['meta_description'] = meta_desc.get('content', '')
             
-            self.logger.info(f"Успешно спарсен товар: {product_data['name']}")
+            self.logger.debug(f"Успешно спарсен товар: {product_data['name']}")
             return product_data
             
         except Exception as e:
@@ -294,7 +280,6 @@ class BunkerDoorsScraper(BaseScraper):
     async def parse_bunker_doors_products(self, catalog_url: str, db: AsyncSession) -> List[ProductCreate]:
         """
         Парсит товары с сайта Bunker Doors из указанного каталога
-        Обновленная версия с парсингом отдельных страниц товаров
         """
         self.logger.info(f"Запуск парсера для каталога {catalog_url}")
         
@@ -306,45 +291,79 @@ class BunkerDoorsScraper(BaseScraper):
         
         # Формируем имя каталога
         catalog_name_part = catalog_slug.replace('-', ' ').title()
-        catalog_name = f"Входные двери Bunker Doors {catalog_name_part}"
+        catalog_name = f"Входные двери Бункер {catalog_name_part}"
         
-        # Получаем или обновляем каталог
+        # Получаем или создаем каталог
         brand_id = await self.ensure_brand_exists(db)
+        await db.commit()
         catalog = await self.get_or_create_catalog(db, catalog_name, catalog_slug, brand_id)
+        await db.commit()
         
+        # Проверяем, что каталог создан и имеет ID
         if not catalog or catalog.id is None:
             self.logger.error(f"Не удалось создать каталог для {catalog_url}")
             return []
             
         catalog_id = catalog.id
         self.logger.info(f"Получен каталог с ID: {catalog_id}")
+
+        from app.models.catalog import Catalog
+        result = await db.execute(select(Catalog).where(Catalog.id == catalog_id))
+        catalog_check = result.scalar_one_or_none()
         
-        # Получаем HTML страницы каталога
-        html_content = self.get_html_content(catalog_url)
-        if not html_content:
+        if not catalog_check:
+            self.logger.error(f"КРИТИЧЕСКАЯ ОШИБКА: Каталог с ID {catalog_id} не найден в базе данных после создания!")
             return []
+        
+        self.logger.info(f"Проверка каталога пройдена: '{catalog_check.name}' существует в БД")
+    
+        
+        # Собираем все ссылки на товары (включая пагинацию)
+        all_product_links = []
+        processed_urls = set()
+        urls_to_process = [catalog_url]
+        
+        while urls_to_process:
+            current_url = urls_to_process.pop(0)
             
-        soup = BeautifulSoup(html_content, 'html.parser')
+            if current_url in processed_urls:
+                continue
+                
+            processed_urls.add(current_url)
+            
+            self.logger.info(f"Обработка страницы: {current_url}")
+            
+            # Получаем HTML страницы каталога
+            html_content = self.get_html_content(current_url)
+            if not html_content:
+                self.logger.warning(f"Не удалось получить контент страницы {current_url}")
+                continue
+                
+            soup = BeautifulSoup(html_content, 'html.parser')
+            
+            # Извлекаем ссылки на товары
+            product_links = self.extract_product_links_from_page(soup, self.base_url)
+            all_product_links.extend(product_links)
+            
+            # Получаем ссылки на следующие страницы
+            pagination_urls = self.get_pagination_urls(soup, current_url)
+            for page_url in pagination_urls:
+                if page_url not in processed_urls:
+                    urls_to_process.append(page_url)
         
-        # Извлекаем ссылки на товары
-        product_links = self.extract_product_links_from_page(soup, self.base_url)
-        
-        if not product_links:
+        if not all_product_links:
             self.logger.warning(f"Не найдено ссылок на товары в каталоге {catalog_url}")
             return []
         
-        self.logger.info(f"Найдено {len(product_links)} ссылок на товары")
+        self.logger.info(f"Найдено {len(all_product_links)} ссылок на товары")
         
         products = []
-        
-        # Ограничиваем количество товаров для тестирования (уберите это в продакшене)
-        max_products = 5
-        product_links = product_links[:max_products]
+        first_product_image = None  # Для сохранения первого изображения продукта
         
         # Парсим каждый товар отдельно
-        for i, product_url in enumerate(product_links):
+        for i, product_url in enumerate(all_product_links):
             try:
-                self.logger.info(f"Обрабатываем товар {i+1}/{len(product_links)}: {product_url}")
+                self.logger.info(f"Обрабатываем товар {i+1}/{len(all_product_links)}: {product_url}")
                 
                 # Парсим страницу товара
                 product_data = self.parse_product_page(product_url)
@@ -359,8 +378,7 @@ class BunkerDoorsScraper(BaseScraper):
                     continue
                 
                 if product_data['price'] <= 0:
-                    self.logger.warning(f"У товара {product_url} некорректная цена: {product_data['price']}")
-                    # Устанавливаем цену по умолчанию или пропускаем
+                    self.logger.warning(f"У товара {product_url} некорректная цена: {product_data['price']}, устанавливаем 1")
                     product_data['price'] = 1
                 
                 # Подготавливаем изображения
@@ -379,28 +397,45 @@ class BunkerDoorsScraper(BaseScraper):
                         is_main=True
                     )]
                 
+                # Если это первый продукт с изображениями, сохраняем его изображение для каталога
+                if not first_product_image and images:
+                    first_product_image = images[0].url
+                    await self.update_catalog_image(db, catalog, first_product_image)
+                
                 # Генерируем slug
                 product_slug = generate_slug(product_data['name'])
+
+                description = product_data['description'] or f"Входная дверь {product_data['name']} от Бункер"
+
+                # Добавляем характеристики в описание
+                if product_data['characteristics']:
+                    characteristics_text = []
+                    for key, value in product_data['characteristics'].items():
+                        if key and value:
+                            characteristics_text.append(f"• {key}: {value}")
+                    
+                    if characteristics_text:
+                        description += "\n\n📋 Технические характеристики:\n" + "\n".join(characteristics_text)
+
+                
+                # Создаем мета-описание
+                meta_description = self.create_meta_description(product_data['description'], product_data['characteristics'])
                 
                 # Создаем объект продукта
                 product = ProductCreate(
                     name=product_data['name'],
                     price=product_data['price'],
                     discount_price=product_data['old_price'] if product_data['old_price'] > 0 else None,
-                    description=product_data['description'] or f"Входная дверь {product_data['name']} от Bunker Doors",
+                    description=description,  # Полное описание с характеристиками
                     catalog_id=catalog_id,
                     images=images,
                     image=images[0].url if images else None,
                     in_stock=product_data['in_stock'],
-                    characteristics=product_data['characteristics'],
                     slug=product_slug,
-                    meta_title=product_data['meta_title'] or f"{product_data['name']} - Bunker Doors",
-                    meta_description=product_data['meta_description'] or product_data['description'][:500],
+                    meta_title=product_data['meta_title'] or f"{product_data['name']} - Бункер",
+                    meta_description=meta_description[:500],
                     brand_id=brand_id,
-                    attributes={
-                        'article': product_data['article'],
-                        'source_url': product_url
-                    }
+                    article=product_data['article']
                 )
                 
                 products.append(product)
@@ -474,29 +509,31 @@ class BunkerDoorsScraper(BaseScraper):
     
     async def parse_multiple_catalogs(self, catalog_urls: List[str], db: AsyncSession) -> int:
         """
-        Парсит несколько каталогов с улучшенной обработкой ошибок
+        Парсит несколько каталогов (точно как в Лабиринте)
         """
         self.logger.info(f"Запуск парсера для {len(catalog_urls)} каталогов")
         total_products = 0
         new_products = 0
         updated_products = 0
         
-        # Получаем бренд один раз в начале процесса
+        # Получаем бренд
         brand_id = await self.ensure_brand_exists(db)
         
-        # Обновляем существующие каталоги, чтобы привязать их к бренду
+        # Обновляем существующие каталоги
         await self.update_catalogs_brand_id(db, brand_id)
         
-        # Получаем ВСЕ общие категории из БД
+        # ШАГИ ПОДГОТОВКИ КАТЕГОРИЙ
+        
+        # 1. Получаем ВСЕ категории из БД
         all_categories = await self.get_all_categories_from_db(db)
         
         if not all_categories:
             self.logger.error("В базе данных нет активных категорий!")
             return 0
         
-        self.logger.info(f"Найдено {len(all_categories)} активных общих категорий в БД")
+        self.logger.info(f"Найдено {len(all_categories)} активных категорий в БД")
         
-        # Получаем обязательную категорию "Все двери" 
+        # 2. Получаем обязательную категорию "Все двери"
         default_category = await self.get_default_category(db)
         
         if not default_category:
@@ -507,7 +544,7 @@ class BunkerDoorsScraper(BaseScraper):
         self.logger.info(f"Основная категория: '{default_category.name}' (ID: {default_category_id})")
         self.logger.info(f"Бренд для всех продуктов: '{self.brand_name}' (ID: {brand_id})")
         
-        # Собираем продукты для последующей классификации
+        # ПАРСИНГ И СОЗДАНИЕ ПРОДУКТОВ
         products_to_classify = []
         
         for url in catalog_urls:
@@ -517,7 +554,7 @@ class BunkerDoorsScraper(BaseScraper):
                 
                 for product_in in products:
                     try:
-                        # Проверка на существование продукта
+                        # Проверка на существование
                         result = await db.execute(
                             select(Product).where(
                                 or_(
@@ -528,17 +565,21 @@ class BunkerDoorsScraper(BaseScraper):
                         )
                         existing_product = result.scalar_one_or_none()
                         
-                        # Создаем или обновляем продукт
+                        # Создаем/обновляем продукт
                         created_product = await create_or_update_product(db, product_in)
                         
                         if created_product:
-                            # Собираем текст для анализа категорий
-                            text_to_analyze = self._prepare_product_text_for_analysis(product_in)
+                            # Собираем ВЕСЬ текст для анализа категорий
+                            analysis_text = self._prepare_product_text_for_analysis(product_in)
                             
-                            # Добавляем в список для классификации
-                            products_to_classify.append((created_product.id, text_to_analyze))
+                            # Добавляем в очередь для классификации
+                            products_to_classify.append({
+                                'product_id': created_product.id,
+                                'text': analysis_text,
+                                'name': product_in.name
+                            })
                             
-                            # Увеличиваем счетчики
+                            # Счетчики
                             total_products += 1
                             if existing_product:
                                 updated_products += 1
@@ -546,9 +587,7 @@ class BunkerDoorsScraper(BaseScraper):
                                 new_products += 1
                                 
                             await db.flush()
-                        else:
-                            self.logger.warning(f"Не удалось создать/обновить продукт {product_in.name}")
-                    
+                        
                     except Exception as e:
                         self.logger.warning(f"Ошибка при обработке товара: {e}")
                         await db.rollback()
@@ -556,41 +595,55 @@ class BunkerDoorsScraper(BaseScraper):
             except Exception as e:
                 self.logger.error(f"Ошибка при обработке каталога {url}: {e}", exc_info=True)
                 await db.rollback()
-
-        # Делаем коммит всех созданных/обновленных продуктов
+        
+        # Коммитим созданные продукты
         try:
             await db.commit()
-            self.logger.info(f"Успешно обработано {total_products} продуктов (новых: {new_products}, обновлено: {updated_products})")
+            self.logger.info(f"Сохранено {total_products} продуктов (новых: {new_products}, обновлено: {updated_products})")
         except Exception as e:
             self.logger.error(f"Ошибка при сохранении продуктов: {e}", exc_info=True)
             await db.rollback()
             return 0
-
-        # Классифицируем продукты по категориям
+        
+        # КЛАССИФИКАЦИЯ ПО КАТЕГОРИЯМ
         if products_to_classify:
-            try:
-                self.logger.info(f"Начинаем классификацию {len(products_to_classify)} продуктов по категориям")
-                
-                classified_count = 0
-                for product_id, text_to_analyze in products_to_classify:
-                    # Классифицируем продукт по тексту
-                    category_matches = await self.classify_product_to_categories(
-                        text_to_analyze, 
+            self.logger.info(f"Начинаем классификацию {len(products_to_classify)} продуктов")
+            
+            classified_count = 0
+            
+            for product_info in products_to_classify:
+                try:
+                    product_id = product_info['product_id']
+                    product_text = product_info['text']
+                    product_name = product_info['name']
+                    
+                    # Находим подходящие дополнительные категории
+                    additional_categories = await self.classify_product_to_categories(
+                        product_text, 
                         all_categories,
-                        min_matches=1
+                        min_matches=1  # Минимум 1 совпадение
                     )
                     
-                    # Назначаем продукт в подходящие категории
+                    # Назначаем продукт в категории (обязательно в "Все двери" + дополнительные)
                     await self.assign_product_to_all_categories(
-                        db, 
-                        product_id, 
-                        category_matches,
+                        db,
+                        product_id,
                         default_category_id,
+                        additional_categories
                     )
                     
                     classified_count += 1
-                
-                # Коммитим все изменения по классификации
+                    
+                    # Логируем результат классификации
+                    additional_names = [cat['name'] for cat in additional_categories[:3]]  # Первые 3
+                    self.logger.debug(f"Продукт '{product_name}' -> Все двери + {additional_names}")
+                    
+                except Exception as e:
+                    self.logger.error(f"Ошибка при классификации продукта {product_info.get('name', 'Unknown')}: {e}")
+                    continue
+            
+            # Коммитим все изменения по категориям
+            try:
                 await db.commit()
                 self.logger.info(f"Успешно классифицировано {classified_count} продуктов")
                 
@@ -598,30 +651,26 @@ class BunkerDoorsScraper(BaseScraper):
                 await self.update_category_counters(db)
                 
             except Exception as e:
-                self.logger.error(f"Ошибка при классификации продуктов: {e}", exc_info=True)
+                self.logger.error(f"Ошибка при сохранении классификации: {e}", exc_info=True)
                 await db.rollback()
-
-        self.logger.info(f"Итого: обработано {total_products} товаров (новых: {new_products}, обновлено: {updated_products})")
+        
+        self.logger.info(f"ИТОГО: {total_products} товаров (новых: {new_products}, обновлено: {updated_products})")
         return total_products
 
     def _prepare_product_text_for_analysis(self, product_in: ProductCreate) -> str:
         """
-        Подготавливает текст продукта для анализа категорий
+        УПРОЩЕНО: Подготовка текста продукта для анализа категорий
+        (характеристики теперь в описании)
         """
         text_parts = []
         
         # Название продукта (самый важный текст)
-        if product_in.name:
+        if hasattr(product_in, 'name') and product_in.name:
             text_parts.append(product_in.name)
         
-        # Описание
-        if product_in.description:
+        # Описание (теперь уже содержит характеристики)
+        if hasattr(product_in, 'description') and product_in.description:
             text_parts.append(product_in.description)
-        
-        # Характеристики
-        if product_in.characteristics:
-            for key, value in product_in.characteristics.items():
-                text_parts.append(f"{key} {value}")
         
         # Мета-информация
         if hasattr(product_in, 'meta_title') and product_in.meta_title:
@@ -630,4 +679,10 @@ class BunkerDoorsScraper(BaseScraper):
         if hasattr(product_in, 'meta_description') and product_in.meta_description:
             text_parts.append(product_in.meta_description)
         
-        return " ".join(text_parts)
+        # Артикул (если есть)
+        if hasattr(product_in, 'article') and product_in.article:
+            text_parts.append(product_in.article)
+        
+        result = " ".join(text_parts)
+        self.logger.debug(f"Подготовлен текст для анализа ({len(result)} символов): {result[:100]}...")
+        return result

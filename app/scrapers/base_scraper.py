@@ -164,19 +164,13 @@ class BaseScraper:
         
         return brand.id
     
+    # В файле app/scrapers/base_scraper.py исправить метод get_or_create_catalog:
+
     async def get_or_create_catalog(self, db: AsyncSession, catalog_name: str, catalog_slug: str, brand_id: int) -> Catalog:
         """
-        Получает или создает каталог с привязкой к бренду
-        
-        Args:
-            db: Сессия базы данных
-            catalog_name: Название каталога
-            catalog_slug: Slug каталога
-            brand_id: ID бренда
-            
-        Returns:
-            Объект каталога
+        ИСПРАВЛЕНО: Получает или создает каталог с обязательным сохранением в БД
         """
+        # Ищем существующий каталог
         result = await db.execute(select(Catalog).where(Catalog.slug == catalog_slug))
         catalog = result.scalar_one_or_none()
         
@@ -188,7 +182,7 @@ class BaseScraper:
                 self.logger.error("Не найдена категория по умолчанию для создания каталога")
                 raise ValueError("Не найдена активная категория для создания каталога")
             
-            # Создаем новый каталог с привязкой к бренду
+            # Создаем новый каталог
             catalog = Catalog(
                 name=catalog_name,
                 slug=catalog_slug,
@@ -197,8 +191,26 @@ class BaseScraper:
                 is_active=True
             )
             db.add(catalog)
+            
+            # ИСПРАВЛЕНО: Принудительно сохраняем и обновляем
             await db.flush()
-            self.logger.info(f"Создан новый каталог: {catalog_name} (бренд ID: {brand_id})")
+            await db.refresh(catalog)
+            
+            # ИСПРАВЛЕНО: Проверяем что ID установлен
+            if catalog.id is None:
+                await db.commit()  # Попытка принудительного коммита
+                await db.refresh(catalog)
+                
+            self.logger.info(f"Создан новый каталог: '{catalog_name}' (ID: {catalog.id}, бренд ID: {brand_id})")
+            
+            # ИСПРАВЛЕНО: Дополнительная проверка существования
+            verification_result = await db.execute(select(Catalog).where(Catalog.id == catalog.id))
+            verification_catalog = verification_result.scalar_one_or_none()
+            
+            if not verification_catalog:
+                self.logger.error(f"КРИТИЧЕСКАЯ ОШИБКА: Каталог {catalog.id} не найден после создания!")
+                raise ValueError(f"Ошибка сохранения каталога {catalog_name}")
+                
         else:
             # Проверяем необходимость обновления
             update_needed = False
@@ -207,7 +219,6 @@ class BaseScraper:
                 catalog.name = catalog_name
                 update_needed = True
                 
-            # Обновляем brand_id, если он отличается или не установлен
             if catalog.brand_id != brand_id:
                 catalog.brand_id = brand_id
                 update_needed = True
@@ -215,9 +226,26 @@ class BaseScraper:
             if update_needed:
                 db.add(catalog)
                 await db.flush()
-                self.logger.info(f"Обновлен существующий каталог: {catalog_name} (бренд ID: {brand_id})")
+                await db.refresh(catalog)
+                self.logger.info(f"Обновлен каталог: '{catalog_name}' (ID: {catalog.id}, бренд ID: {brand_id})")
         
         return catalog
+
+    # НОВЫЙ МЕТОД: Проверка существования каталога
+    async def verify_catalog_exists(self, db: AsyncSession, catalog_id: int) -> bool:
+        """
+        Проверяет, что каталог с указанным ID существует в базе данных
+        
+        Args:
+            db: Сессия базы данных
+            catalog_id: ID каталога
+            
+        Returns:
+            bool: True если каталог существует
+        """
+        result = await db.execute(select(func.count(Catalog.id)).where(Catalog.id == catalog_id))
+        count = result.scalar_one()
+        return count > 0
     
     async def update_catalog_image(self, db: AsyncSession, catalog: Catalog, image_url: str) -> None:
         """Обновляет изображение каталога"""
@@ -543,13 +571,15 @@ class BaseScraper:
         
         return matched_categories
     
+    # Исправление для базового класса BaseScraper
+
     async def assign_product_to_all_categories(self, 
-                                             db: AsyncSession, 
-                                             product_id: int,
-                                             default_category_id: int,
-                                             additional_categories: List[Dict]) -> None:
+                                         db: AsyncSession, 
+                                         product_id: int,
+                                         default_category_id: int,
+                                         additional_categories: List[Dict]) -> None:
         """
-        Назначает продукт в категорию "Все двери" и дополнительные категории
+        ИСПРАВЛЕНО: Назначает продукт в категорию "Все двери" и дополнительные категории
         
         Args:
             db: Сессия базы данных
@@ -571,7 +601,9 @@ class BaseScraper:
         
         # 2. Добавляем в дополнительные категории
         for category_info in additional_categories:
+            # ИСПРАВЛЕНО: Правильно извлекаем ID из словаря
             category_id = category_info['id']
+            category_name = category_info['name']
             
             # Пропускаем, если это та же категория, что и основная
             if category_id == default_category_id:
@@ -585,7 +617,7 @@ class BaseScraper:
             assigned_categories.append(category_id)
             
             self.logger.info(
-                f"Продукт {product_id} добавлен в дополнительную категорию '{category_info['name']}' "
+                f"Продукт {product_id} добавлен в дополнительную категорию '{category_name}' "
                 f"(вес: {category_info['weight']:.2f}, совпадений: {category_info['matches']}, "
                 f"ключевые слова: {', '.join(category_info['matched_keywords'][:3])})"
             )
@@ -593,6 +625,14 @@ class BaseScraper:
         await db.flush()
         
         self.logger.info(f"Продукт {product_id} назначен в {len(assigned_categories)} категорий")
+
+    async def clear_product_categories(self, db: AsyncSession, product_id: int) -> None:
+        """
+        ДОБАВЛЕНО: Очищает все связи продукта с категориями
+        """
+        stmt = delete(product_categories).where(product_categories.c.product_id == product_id)
+        await db.execute(stmt)
+        self.logger.debug(f"Очищены все категории для продукта {product_id}")
 
     # ---------- Основной метод парсинга ----------
     
@@ -602,3 +642,20 @@ class BaseScraper:
         Реализация зависит от конкретных скраперов
         """
         raise NotImplementedError("Этот метод должен быть переопределен в дочернем классе")
+    
+    def create_meta_description(self, description: str, characteristics: Dict[str, str] = None) -> str:
+        """
+        ИСПРАВЛЕНО: Создает мета-описание на основе описания
+        (характеристики теперь уже включены в описание)
+        """
+        if not description:
+            return ""
+        
+        # Берем первую часть описания (до характеристик, если они есть)
+        if "\n\nХарактеристики:" in description:
+            main_description = description.split("\n\nХарактеристики:")[0]
+        else:
+            main_description = description
+        
+        # Ограничиваем длину
+        return main_description[:500]

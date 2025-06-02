@@ -11,7 +11,6 @@ import asyncio
 from app.core.database import AsyncSessionLocal
 from app.crud.import_log import create_import_log, update_import_log_status
 
-from app.deps import get_db
 from app.models.category import Category
 from app.scrapers.bunker_doors import BunkerDoorsScraper
 from app.services.csv_import import import_products_from_df
@@ -327,63 +326,110 @@ def scrape_as_doors_multiple_catalogs_task(self, catalog_urls: List[str]):
         # Удаляем ссылку на event loop из текущего потока
         asyncio.set_event_loop(None)
 
+
 @shared_task(bind=True, max_retries=3)
 def scrape_bunker_doors_multiple_catalogs_task(self, catalog_urls: List[str]):
+    """
+    Celery задача для парсинга каталогов Bunker Doors
+    """
+    logger.info(f"Запуск задачи парсинга {len(catalog_urls)} каталогов Bunker Doors")
     
-    async def _scrape():
-        async with AsyncSessionLocal() as db:
-            scraper = BunkerDoorsScraper()
-            try:
-                # Проверяем наличие активных категорий
-                result = await db.execute(
-                    select(func.count(Category.id)).where(Category.is_active == True)
-                )
-                category_count = result.scalar_one()
-                
-                if category_count == 0:
-                    raise Exception("В базе данных нет активных категорий!")
-                
-                # Проверяем наличие категории "Все двери"
-                result = await db.execute(
-                    select(func.count(Category.id)).where(
-                        func.lower(Category.name).like('%все двери%'),
-                        Category.is_active == True
-                    )
-                )
-                default_category_count = result.scalar_one()
-                
-                if default_category_count == 0:
+    # Создаем новый event loop для каждого запуска задачи
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        
+    try:
+        # Определяем асинхронную функцию для обработки каталогов
+        async def process_catalogs():
+            async with AsyncSessionLocal() as db:
+                try:
+                    # Обновляем статус задачи
                     self.update_state(
-                        state='WARNING',
+                        state='PROGRESS',
                         meta={
-                            'message': 'Не найдена категория "Все двери". Будет использована первая доступная категория.',
-                            'categories_available': category_count
+                            'progress': 10,
+                            'message': 'Инициализация парсера Bunker Doors...',
+                            'stage': 'initialization'
                         }
                     )
-                
-                # Запускаем парсинг
-                # Бренд "Bunker Doors" будет автоматически установлен для всех продуктов
-                total_products = await scraper.parse_multiple_catalogs(catalog_urls, db)
-                
-                self.update_state(
-                    state='SUCCESS',
-                    meta={
-                        'total_products': total_products,
-                        'categories_used': category_count,
-                        'brand': 'Bunker Doors',
-                        'message': f'Обработано {total_products} продуктов бренда "Bunker Doors" и распределено по {category_count} общим категориям'
-                    }
-                )
-                
-            except Exception as e:
-                self.update_state(
-                    state='FAILURE',
-                    meta={
-                        'error': str(e),
-                        'message': 'Ошибка при парсинге каталогов Bunker Doors'
-                    }
-                )
-                raise
-    
-    import asyncio
-    asyncio.run(_scrape())
+                    
+                    # Создаем экземпляр скрапера и запускаем парсинг
+                    scraper = BunkerDoorsScraper()
+                    
+                    # Проверяем/создаем бренд "Бункер"
+                    brand_id = await scraper.ensure_brand_exists(db)
+                    
+                    self.update_state(
+                        state='PROGRESS',
+                        meta={
+                            'progress': 20,
+                            'message': f'Бренд "Бункер" готов (ID: {brand_id}). Начинаем парсинг...',
+                            'stage': 'brand_ready'
+                        }
+                    )
+                    
+                    total_products = await scraper.parse_multiple_catalogs(catalog_urls, db)
+                    
+                    self.update_state(
+                        state='SUCCESS',
+                        meta={
+                            'progress': 100,
+                            'total_products': total_products,
+                            'brand': 'Бункер',
+                            'message': f'Парсинг Bunker Doors завершен, обработано {total_products} товаров'
+                        }
+                    )
+                    
+                    return total_products
+                    
+                except Exception as e:
+                    await db.rollback()
+                    logger.error(f"Ошибка при парсинге каталогов Bunker Doors: {e}", exc_info=True)
+                    raise e
+        
+        # Выполняем асинхронную функцию в event loop
+        total_products = loop.run_until_complete(process_catalogs())
+        
+        logger.info(f"Задача парсинга Bunker Doors завершена успешно: {total_products} товаров")
+        
+        return {
+            'status': 'success',
+            'processed': total_products,
+            'brand': 'Бункер',
+            'message': f"Парсинг Bunker Doors завершен, обработано {total_products} товаров"
+        }
+        
+    except Exception as e:
+        logger.error(f"Ошибка при парсинге Bunker Doors: {e}", exc_info=True)
+        
+        # Повторяем задачу с экспоненциальной задержкой
+        countdown = 30 * (2 ** self.request.retries)  # 30 сек, 60 сек, 120 сек
+        
+        self.update_state(
+            state="FAILURE",
+            meta={
+                'progress': 0,
+                'error': str(e),
+                'message': f"Ошибка при парсинге Bunker Doors: {str(e)}"
+            }
+        )
+        
+        self.retry(exc=e, countdown=countdown)
+        
+        return {
+            'status': 'error',
+            'error': str(e),
+            'message': "Парсинг Bunker Doors завершился с ошибкой"
+        }
+    finally:
+        # Очищаем текущий event loop, но не закрываем его
+        if 'loop' in locals() and loop.is_running():
+            loop.stop()
+        # Удаляем ссылку на event loop из текущего потока
+        asyncio.set_event_loop(None)

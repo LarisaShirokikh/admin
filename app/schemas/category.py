@@ -1,37 +1,24 @@
-# app/schemas/category.py
-from pydantic import BaseModel, Field, field_validator, validator
+# app/schemas/category.py (под вашу модель)
+from pydantic import BaseModel, Field, field_validator, ConfigDict
 from typing import Optional, List
 from datetime import datetime
 
 class CategoryBase(BaseModel):
     """Базовая схема категории"""
-    id: int
-    name: str
-    slug: str
+    name: str = Field(..., min_length=1, max_length=255)
     description: Optional[str] = None
     image_url: Optional[str] = None
     is_active: bool = True
-    product_count: int = 0
-    meta_title: Optional[str] = None
-    meta_description: Optional[str] = None
-    meta_keywords: Optional[str] = None
-    created_at: datetime
-    updated_at: Optional[datetime] = None
-
-    class Config:
-        from_attributes = True
-
-class CategoryCreate(BaseModel):
-    """Схема для создания категории"""
-    name: str = Field(..., min_length=1, max_length=255)
-    description: Optional[str] = Field(None, max_length=1000)
-    is_active: bool = True
-    image_url: Optional[str] = None
     meta_title: Optional[str] = Field(None, max_length=255)
     meta_description: Optional[str] = Field(None, max_length=500)
     meta_keywords: Optional[str] = Field(None, max_length=255)
 
+class CategoryCreate(CategoryBase):
+    """Схема для создания категории"""
+    slug: Optional[str] = None
+    
     @field_validator('name')
+    @classmethod
     def validate_name(cls, v):
         if not v or not v.strip():
             raise ValueError('Название категории не может быть пустым')
@@ -40,22 +27,44 @@ class CategoryCreate(BaseModel):
 class CategoryUpdate(BaseModel):
     """Схема для обновления категории"""
     name: Optional[str] = Field(None, min_length=1, max_length=255)
-    description: Optional[str] = Field(None, max_length=1000)
-    is_active: Optional[bool] = None
+    slug: Optional[str] = None
+    description: Optional[str] = None
     image_url: Optional[str] = None
+    is_active: Optional[bool] = None
     meta_title: Optional[str] = Field(None, max_length=255)
     meta_description: Optional[str] = Field(None, max_length=500)
     meta_keywords: Optional[str] = Field(None, max_length=255)
 
     @field_validator('name')
+    @classmethod
     def validate_name(cls, v):
         if v is not None and (not v or not v.strip()):
             raise ValueError('Название категории не может быть пустым')
         return v.strip() if v else v
 
+class CategoryResponse(CategoryBase):
+    """Схема для ответа с категорией"""
+    model_config = ConfigDict(from_attributes=True)
+    
+    id: int
+    slug: str
+    product_count: int = 0
+    created_at: datetime
+    updated_at: Optional[datetime] = None
+
+class CategoryBrief(BaseModel):
+    """Краткая информация о категории для связанных объектов"""
+    model_config = ConfigDict(from_attributes=True)
+    
+    id: int
+    name: str
+    slug: str
+    image_url: Optional[str] = None
+
+# Остальные схемы для API
 class CategoryList(BaseModel):
     """Схема для списка категорий с пагинацией"""
-    items: List[CategoryBase]
+    items: List[CategoryResponse]
     total: int
     page: int
     per_page: int
@@ -78,4 +87,4 @@ class CategoryDeleteResponse(BaseModel):
 class CategoryStatusToggleResponse(BaseModel):
     """Ответ при изменении статуса категории"""
     message: str
-    category: CategoryBase
+    category: CategoryResponse
