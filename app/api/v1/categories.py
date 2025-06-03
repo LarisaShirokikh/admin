@@ -5,7 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from typing import List, Optional
 
 from app.models.product import Product
-from app.schemas.category import CategoryCreate, CategoryBase
+from app.schemas.category import CategoryCreate, CategoryResponse, CategoryDeleteResponse, CategoryStatusToggleResponse
 from app.crud.category import (
     create_category, get_category_by_id, delete_category, delete_image_file, 
     get_categories, get_products_by_category_id, save_image_file, 
@@ -20,12 +20,12 @@ UPLOAD_DIR = "/app/media/categories"
 ALLOWED_EXTENSIONS = [".png", ".jpg", ".jpeg", ".gif", ".webp"]
 MAX_FILE_SIZE = 10 * 1024 * 1024  # 10MB
 
-@router.get("/", response_model=List[CategoryBase])
+@router.get("/", response_model=List[CategoryResponse])
 async def list_categories(db: AsyncSession = Depends(get_db)):
-    """Получение списка всех категорий"""
+    """Получение списка всех категорий с ID"""
     return await get_categories(db)
 
-@router.get("/{category_id}", response_model=CategoryBase)
+@router.get("/{category_id}", response_model=CategoryResponse)
 async def get_category(category_id: int, db: AsyncSession = Depends(get_db)):
     """Получение категории по ID"""
     category = await get_category_by_id(db, category_id)
@@ -33,7 +33,7 @@ async def get_category(category_id: int, db: AsyncSession = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Категория не найдена")
     return category
 
-@router.post("/", response_model=CategoryBase)
+@router.post("/", response_model=CategoryResponse)
 async def create_cat(
     name: str = Form(...),
     description: Optional[str] = Form(None),
@@ -72,7 +72,7 @@ async def create_cat(
         delete_image_file(f"/media/categories/{unique_filename}")
         raise HTTPException(status_code=500, detail=f"Ошибка создания категории: {str(e)}")
 
-@router.put("/{category_id}", response_model=CategoryBase)
+@router.put("/{category_id}", response_model=CategoryResponse)
 async def update_cat(
     category_id: int,
     name: Optional[str] = Form(None),
@@ -128,7 +128,7 @@ async def update_cat(
             delete_image_file(f"/media/categories/{new_filename}")
         raise HTTPException(status_code=500, detail=f"Ошибка обновления категории: {str(e)}")
 
-@router.delete("/{category_id}")
+@router.delete("/{category_id}", response_model=CategoryDeleteResponse)
 async def delete_cat(
     category_id: int,
     delete_products: bool = False,  # Флаг для каскадного удаления товаров
@@ -172,12 +172,12 @@ async def delete_cat(
         
         await db.commit()
         
-        return {
-            "message": f"Категория '{category.name}' успешно удалена",
-            "products_affected": len(products) if products else 0,
-            "products_deleted": len(products) if delete_products and products else 0,
-            "products_unlinked": len(products) if not delete_products and products else 0
-        }
+        return CategoryDeleteResponse(
+            message=f"Категория '{category.name}' успешно удалена",
+            products_affected=len(products) if products else 0,
+            products_deleted=len(products) if delete_products and products else 0,
+            products_unlinked=len(products) if not delete_products and products else 0
+        )
         
     except Exception as e:
         await db.rollback()
@@ -201,7 +201,7 @@ async def get_category_products(
         "products": products
     }
 
-@router.post("/{category_id}/toggle-status")
+@router.post("/{category_id}/toggle-status", response_model=CategoryStatusToggleResponse)
 async def toggle_category_status(
     category_id: int,
     db: AsyncSession = Depends(get_db)
@@ -214,7 +214,7 @@ async def toggle_category_status(
     new_status = not category.is_active
     updated_category = await update_category(db, category_id, {"is_active": new_status})
     
-    return {
-        "message": f"Статус категории изменен на {'активный' if new_status else 'неактивный'}",
-        "category": updated_category
-    }
+    return CategoryStatusToggleResponse(
+        message=f"Статус категории изменен на {'активный' if new_status else 'неактивный'}",
+        category=updated_category
+    )

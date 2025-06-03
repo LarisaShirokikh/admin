@@ -13,6 +13,7 @@ from .catalog_image import CatalogImage
 from .review import Review
 from .product_video import ProductVideo
 from .product_ranking import ProductRanking
+from .user import User
 
 # Импорт связующих таблиц
 from .attributes import product_categories
@@ -31,5 +32,6 @@ __all__ = [
     "Review",  
     "product_categories",
     "ProductRanking",
-    "ProductVideo"
+    "ProductVideo",
+    "User"
 ]

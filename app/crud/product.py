@@ -482,7 +482,6 @@ async def create_or_update_product(db: AsyncSession, product_in: ProductCreate) 
             existing_product.catalog_id = product_in.catalog_id
             existing_product.brand_id = product_in.brand_id
             existing_product.in_stock = product_in.in_stock
-            existing_product.characteristics = product_in.characteristics
             
             # Обновляем slug только если он есть
             if hasattr(product_in, 'slug') and product_in.slug:

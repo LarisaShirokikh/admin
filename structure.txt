@@ -9,7 +9,9 @@
 │   ├── README
 │   ├── script.py.mako
 │   └── versions
+│       ├── 01fbfc7829f0_category_table.py
 │       ├── 06c57be65746_product_fix_models.py
+│       ├── 0f01266ce01c_product_table.py
 │       ├── 1f591f7a4ac7_banners_promo_models.py
 │       ├── 24462822979b_categorie_image.py
 │       ├── 24e2fa10e739_add_brend_and_catalog_table.py
@@ -19,6 +21,7 @@
 │       ├── 43a9080c6764_product_table.py
 │       ├── 48591978fe3c_initial_models.py
 │       ├── 4ddf1214cf9c_video_add.py
+│       ├── 52bf79b4691c_remove_manufacturer_from_categories.py
 │       ├── 6592dfcb0f85_video_table.py
 │       ├── 663ce9cdf957_new_models.py
 │       ├── 6f9e946a9a5e_add_video_models.py
@@ -37,6 +40,8 @@
 │       ├── bbfbea63e156_product_add_brand.py
 │       ├── c1cdd5e0bcf9_add_product_count_to_categories.py
 │       ├── c9318b4f1aef_product_add_discount.py
+│       ├── cca5f5a29024_fix_table.py
+│       ├── cdbff6a7c6b3_video_table.py
 │       ├── d323665dbece_product_table.py
 │       ├── d7234108921e_rank_table.py
 │       ├── d757a0b3ce21_product_fix_models.py
@@ -44,6 +49,7 @@
 │       ├── e89c62d6d915_add_video_models.py
 │       ├── e8db9a2649e0_categorie_image.py
 │       ├── ef7e54dd6362_video_add.py
+│       ├── f2873cdbabc5_category_table.py
 │       ├── fa55086ad251_product_table.py
 │       └── fcf46aaa1e14_banners_promo_models.py
 ├── alembic.ini
@@ -63,18 +69,17 @@
 │   │   ├── config.py
 │   │   └── database.py
 │   ├── crud
+│   │   ├── __init__.py
 │   │   ├── brand.py
 │   │   ├── catalog.py
 │   │   ├── category.py
-│   │   ├── color.py
 │   │   ├── import_log.py
 │   │   ├── material.py
 │   │   ├── product_relations.py
 │   │   ├── product.py
 │   │   ├── review.py
+│   │   ├── user.py
 │   │   └── video.py
-│   ├── data
-│   │   └── categories_data.py
 │   ├── deps.py
 │   ├── main.py
 │   ├── models
@@ -85,13 +90,14 @@
 │   │   ├── catalog_image.py
 │   │   ├── catalog.py
 │   │   ├── category.py
-│   │   ├── color.py
 │   │   ├── import_log.py
 │   │   ├── product_image.py
 │   │   ├── product_ranking.py
+│   │   ├── product_video.py
 │   │   ├── product.py
 │   │   ├── promotion.py
 │   │   ├── review.py
+│   │   ├── user.py
 │   │   └── video.py
 │   ├── schemas
 │   │   ├── banner.py
@@ -99,9 +105,7 @@
 │   │   ├── catalog_image.py
 │   │   ├── catalog.py
 │   │   ├── category.py
-│   │   ├── color.py
 │   │   ├── import_log.py
-│   │   ├── material.py
 │   │   ├── product_image.py
 │   │   ├── product.py
 │   │   ├── promotion.py
@@ -111,6 +115,7 @@
 │   │   ├── __init__.py
 │   │   ├── as_doors.py
 │   │   ├── base_scraper.py
+│   │   ├── bunker_doors.py
 │   │   ├── intecron.py
 │   │   ├── labirint.py
 │   │   └── scraper_runner.py
@@ -122,92 +127,31 @@
 │   └── worker
 │       ├── celery_app.py
 │       └── tasks.py
-├── core
-│   ├── celery_config.py
-│   ├── config.py
-│   └── database.py
-├── crud
-│   ├── brand.py
-│   ├── catalog.py
-│   ├── category.py
-│   ├── color.py
-│   ├── import_log.py
-│   ├── material.py
-│   ├── product_relations.py
-│   ├── product.py
-│   ├── review.py
-│   └── video.py
-├── data
-│   └── categories_data.py
-├── debug_script.py
-├── deps.py
 ├── docker-compose.yml
 ├── Dockerfile
-├── main.py
 ├── media
-│   └── categories
-│       ├── all2.png
-│       ├── bel.png
-│       ├── black.png
-│       ├── dom.png
-│       ├── electro.png
-│       ├── hit.png
-│       ├── kvart.png
-│       ├── loft.png
-│       ├── new.png
-│       ├── shum.png
-│       ├── steklo.png
-│       ├── venge.png
-│       └── zer.png
-├── models
-│   ├── __init__.py
-│   ├── attributes.py
-│   ├── banner.py
-│   ├── brand.py
-│   ├── catalog_image.py
-│   ├── catalog.py
-│   ├── category.py
-│   ├── color.py
-│   ├── import_log.py
-│   ├── product_image.py
-│   ├── product_ranking.py
-│   ├── product.py
-│   ├── promotion.py
-│   ├── review.py
-│   └── video.py
+│   ├── categories
+│   │   ├── 6d848f3d-952e-432b-b4e2-e9d235b854fc.png
+│   │   ├── ad40da84-6dae-47d9-8e9f-ee4ceb7e3c22.png
+│   │   ├── all2.png
+│   │   ├── bel.png
+│   │   ├── black.png
+│   │   ├── dom.png
+│   │   ├── electro.png
+│   │   ├── hit.png
+│   │   ├── kvart.png
+│   │   ├── new.png
+│   │   ├── shum.png
+│   │   ├── steklo.png
+│   │   ├── venge.png
+│   │   └── zer.png
+│   ├── thumbnails
+│   └── videos
+│       ├── 153ab949-f97f-4a4e-b613-57e00c61eb8d_КРЕДОР.MOV
+│       ├── 2b3f8d46-0ec0-4d8b-8a8b-c82269ae0ed0_IMG_7027.MOV
+│       └── a1e03209-e24c-43c6-b629-c5867340c676_Royal c био.MOV
 ├── poetry.lock
 ├── pyproject.toml
-├── schemas
-│   ├── banner.py
-│   ├── brand.py
-│   ├── catalog_image.py
-│   ├── catalog.py
-│   ├── category.py
-│   ├── color.py
-│   ├── import_log.py
-│   ├── material.py
-│   ├── product_image.py
-│   ├── product.py
-│   ├── promotion.py
-│   ├── review.py
-│   └── video.py
-├── scrapers
-│   ├── __init__.py
-│   ├── as_doors.py
-│   ├── base_scraper.py
-│   ├── intecron.py
-│   ├── labirint.py
-│   └── scraper_runner.py
-├── services
-│   ├── csv_import.py
-│   └── product_ranking_service.py
-├── structure.txt
-├── utils
-│   └── text_utils.py
-├── worker
-│   ├── celery_app.py
-│   └── tasks.py
-└── workflows
-    └── deploy.yml
+└── structure.txt
 
-29 directories, 182 files
+20 directories, 135 files
