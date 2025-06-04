@@ -12,19 +12,11 @@ from app.schemas.product import (
     ProductListItem,
     ProductFilter,
     ProductResponse,
-    ProductCreateResponse
 )
 from app.crud.product import (
-    get_all_products, 
-    create_product, 
-    get_all_products_filtered, 
-    get_product_by_id, 
     get_product_by_title,
-    get_product_by_slug,
-    update_product,
     delete_product,
     soft_delete_product,
-    get_products_paginated,
     get_products_count,
     toggle_product_status,
     create_or_update_product,
@@ -33,7 +25,6 @@ from app.crud.product import (
     get_product_by_slug_with_relations,
     get_products_paginated_with_relations,
     get_all_products_filtered_with_relations,
-    get_all_products_with_relations,
     update_product_with_relations,
     create_product_with_relations
 )
