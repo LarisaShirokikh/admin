@@ -96,61 +96,110 @@ def scrape_labirint_multiple_catalogs_task(self, catalog_urls: List[str]):
     """
     Celery задача для парсинга с динамической категоризацией
     """
-    async def _scrape():
-        async with AsyncSessionLocal() as db:
-            scraper = LabirintScraper()
-            try:
-                # Проверяем наличие активных категорий
-                result = await db.execute(
-                    select(func.count(Category.id)).where(Category.is_active == True)
-                )
-                category_count = result.scalar_one()
-                
-                if category_count == 0:
-                    raise Exception("В базе данных нет активных категорий!")
-                
-                # Проверяем наличие категории "Все двери"
-                result = await db.execute(
-                    select(func.count(Category.id)).where(
-                        func.lower(Category.name).like('%все двери%'),
-                        Category.is_active == True
+    logger.info(f"Запуск задачи парсинга {len(catalog_urls)} каталогов Labirint")
+    
+    # Создаем новый event loop для каждого запуска задачи
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        
+    try:
+        # Определяем асинхронную функцию для обработки каталогов
+        async def process_catalogs():
+            async with AsyncSessionLocal() as db:
+                try:
+                    scraper = LabirintScraper()
+                    
+                    # Проверяем наличие активных категорий
+                    result = await db.execute(
+                        select(func.count(Category.id)).where(Category.is_active == True)
                     )
-                )
-                default_category_count = result.scalar_one()
-                
-                if default_category_count == 0:
+                    category_count = result.scalar_one()
+                    
+                    if category_count == 0:
+                        raise Exception("В базе данных нет активных категорий!")
+                    
+                    # Проверяем наличие категории "Все двери"
+                    result = await db.execute(
+                        select(func.count(Category.id)).where(
+                            func.lower(Category.name).like('%все двери%'),
+                            Category.is_active == True
+                        )
+                    )
+                    default_category_count = result.scalar_one()
+                    
+                    if default_category_count == 0:
+                        self.update_state(
+                            state='WARNING',
+                            meta={
+                                'message': 'Не найдена категория "Все двери". Будет использована первая доступная категория.',
+                                'categories_available': category_count
+                            }
+                        )
+                    
+                    # Запускаем парсинг
+                    total_products = await scraper.parse_multiple_catalogs(catalog_urls, db)
+                    
                     self.update_state(
-                        state='WARNING',
+                        state='SUCCESS',
                         meta={
-                            'message': 'Не найдена категория "Все двери". Будет использована первая доступная категория.',
-                            'categories_available': category_count
+                            'total_products': total_products,
+                            'categories_used': category_count,
+                            'message': f'Обработано {total_products} продуктов и распределено по {category_count} категориям'
                         }
                     )
-                
-                # Запускаем парсинг
-                total_products = await scraper.parse_multiple_catalogs(catalog_urls, db)
-                
-                self.update_state(
-                    state='SUCCESS',
-                    meta={
-                        'total_products': total_products,
-                        'categories_used': category_count,
-                        'message': f'Обработано {total_products} продуктов и распределено по {category_count} категориям'
-                    }
-                )
-                
-            except Exception as e:
-                self.update_state(
-                    state='FAILURE',
-                    meta={
-                        'error': str(e),
-                        'message': 'Ошибка при парсинге каталогов'
-                    }
-                )
-                raise
-    
-    import asyncio
-    asyncio.run(_scrape())
+                    
+                    return total_products
+                    
+                except Exception as e:
+                    await db.rollback()
+                    logger.error(f"Ошибка при парсинге каталогов Labirint: {e}", exc_info=True)
+                    raise e
+        
+        # Выполняем асинхронную функцию в event loop
+        total_products = loop.run_until_complete(process_catalogs())
+        
+        logger.info(f"Задача парсинга Labirint завершена успешно: {total_products} товаров")
+        
+        return {
+            'status': 'success',
+            'processed': total_products,
+            'message': f"Парсинг Labirint завершен, обработано {total_products} товаров"
+        }
+        
+    except Exception as e:
+        logger.error(f"Ошибка при парсинге Labirint: {e}", exc_info=True)
+        
+        # Повторяем задачу с экспоненциальной задержкой
+        countdown = 30 * (2 ** self.request.retries)  # 30 сек, 60 сек, 120 сек
+        
+        self.update_state(
+            state="FAILURE",
+            meta={
+                'progress': 0,
+                'error': str(e),
+                'message': f"Ошибка при парсинге Labirint: {str(e)}"
+            }
+        )
+        
+        self.retry(exc=e, countdown=countdown)
+        
+        return {
+            'status': 'error',
+            'error': str(e),
+            'message': "Парсинг Labirint завершился с ошибкой"
+        }
+    finally:
+        # Очищаем текущий event loop, но не закрываем его
+        if 'loop' in locals() and loop.is_running():
+            loop.stop()
+        # Удаляем ссылку на event loop из текущего потока
+        asyncio.set_event_loop(None)
 
 @celery_app.task(bind=True, max_retries=3)
 def scrape_intecron_task(self):

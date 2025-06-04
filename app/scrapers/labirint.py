@@ -112,7 +112,7 @@ class LabirintScraper(BaseScraper):
                     description = f"Входная дверь {name} от производителя. Качественная металлическая дверь с надежной защитой."
     
                 # Извлекаем характеристики продукта
-                characteristics = {}
+                characteristics_text = []
                 specs = soup.select(".product-01__specifications .product-specifications-01__row")
                 for spec in specs:
                     spec_name = spec.select_one(".product-specifications-01__caption")
@@ -120,7 +120,15 @@ class LabirintScraper(BaseScraper):
                     if spec_name and spec_value:
                         key = clean_text(spec_name.get_text())
                         value = clean_text(spec_value.get_text())
-                        characteristics[key] = value
+                        characteristics_text.append(f"{key}: {value}")
+
+                # Объединяем описание с характеристиками
+                final_description = description
+                if characteristics_text:
+                    final_description += "\n\nХарактеристики:\n" + "\n".join(characteristics_text)
+
+                if not final_description.strip():
+                    final_description = f"Входная дверь {name} от производителя. Качественная металлическая дверь с надежной защитой."
     
                 # Получаем изображения
                 image_urls = []
@@ -171,18 +179,17 @@ class LabirintScraper(BaseScraper):
                 product_slug = generate_slug(name)
                 
                 # Создаем мета-описание
-                meta_description = self.create_meta_description(description, characteristics)
+                meta_description = self.create_meta_description(final_description, None)
                 
                 # Создаем объект продукта
                 product = ProductCreate(
                     name=name,
                     price=price,
-                    description=description,
+                    description=final_description,
                     catalog_id=catalog_id,  # Передаем обязательный catalog_id вместо catalog_name
                     images=images,
                     image=image_urls[0] if image_urls else None,
                     in_stock=True,
-                    characteristics=characteristics,
                     slug=product_slug,
                     meta_title=f"{name}",
                     meta_description=meta_description[:500],
@@ -352,10 +359,6 @@ class LabirintScraper(BaseScraper):
         if product_in.description:
             text_parts.append(product_in.description)
         
-        # Характеристики
-        if product_in.characteristics:
-            for key, value in product_in.characteristics.items():
-                text_parts.append(f"{key} {value}")
         
         # Мета-информация
         if hasattr(product_in, 'meta_title') and product_in.meta_title:

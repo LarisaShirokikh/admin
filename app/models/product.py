@@ -20,7 +20,6 @@ class Product(Base):
     brand_id = Column(Integer, ForeignKey('brands.id', ondelete='SET NULL'), nullable=True)  # Добавлено в админку
     catalog_id = Column(Integer, ForeignKey("catalogs.id"), nullable=False)  # Оставлено из админки
     in_stock = Column(Boolean, default=True)
-    characteristics = Column(JSON, nullable=True)  # Согласуется с attributes
     
     # Дополнительные поля из бэкенда
     type = Column(String(100), nullable=True, index=True)  # Добавлено в админку

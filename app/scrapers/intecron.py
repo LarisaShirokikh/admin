@@ -1,10 +1,8 @@
 """
 Скрапер для сайта Intecron
 """
-from typing import List, Dict, Any, Optional, Set
+from typing import List, Optional
 import logging
-import json
-import time
 import re
 from bs4 import BeautifulSoup
 from sqlalchemy import func, or_, select
@@ -256,7 +254,6 @@ class IntecronScraper(BaseScraper):
         self.logger.info(f"Успешно создан продукт: {name} с {len(images)} изображениями, catalog_id: {catalog_id}")
         return product
     
-    # Обновленные селекторы для извлечения изображений
     def extract_product_images(self, soup: BeautifulSoup, product_url: str) -> List[str]:
         """
         Извлекает только качественные изображения продукта
@@ -328,7 +325,6 @@ class IntecronScraper(BaseScraper):
         """
         Проверяет, является ли URL качественным изображением продукта
         """
-        # Основные критерии для продуктовых изображений
         if not url:
             return False
         
@@ -336,7 +332,6 @@ class IntecronScraper(BaseScraper):
         if not url.lower().endswith(('.jpg', '.jpeg', '.png', '.webp')):
             return False
         
-        # Проверяем, что URL содержит /upload/ или /iblock/ (типично для Bitrix)
         if '/upload/' not in url and '/iblock/' not in url:
             return False
         

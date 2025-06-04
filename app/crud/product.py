@@ -364,7 +364,6 @@ async def create_product(db: AsyncSession, product_data: ProductCreate, auto_com
             existing_product.discount_price = discount_price
             existing_product.price = price
             existing_product.in_stock = product_data.in_stock
-            existing_product.characteristics = product_data.characteristics
             
             # Обновляем slug, если он был создан
             if hasattr(existing_product, 'slug') and product_slug:
@@ -390,8 +389,7 @@ async def create_product(db: AsyncSession, product_data: ProductCreate, auto_com
             "discount_price": discount_price,
             "price": price,
             "in_stock": product_data.in_stock,
-            "catalog_id": catalog.id,
-            "characteristics": product_data.characteristics
+            "catalog_id": catalog.id
         }
         
         # Добавляем slug, если он необходим
@@ -515,7 +513,7 @@ async def create_or_update_product(db: AsyncSession, product_in: ProductCreate) 
             # Копируем только существующие атрибуты
             for field in [
                 "name", "price", "description", "catalog_id", "brand_id", 
-                "in_stock", "characteristics", "meta_title", "meta_description", 
+                "in_stock", "meta_title", "meta_description", 
                 "rating"
             ]:
                 if hasattr(product_in, field):

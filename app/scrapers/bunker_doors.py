@@ -10,7 +10,6 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.product import Product
-from app.models.catalog import Catalog
 from app.schemas.product import ProductCreate
 from app.schemas.product_image import ProductImageCreate
 from app.utils.text_utils import generate_slug, clean_text
