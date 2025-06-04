@@ -1,10 +1,9 @@
 """
 Скрапер для сайта Лабиринт Двери
 """
-from typing import List, Dict, Any, Optional
+from typing import List
 import logging
 import json
-import re
 from bs4 import BeautifulSoup
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -206,15 +205,8 @@ class LabirintScraper(BaseScraper):
         new_products = 0
         updated_products = 0
         
-        # Получаем бренд
         brand_id = await self.ensure_brand_exists(db)
-        
-        # Обновляем существующие каталоги
         await self.update_catalogs_brand_id(db, brand_id)
-        
-        # ШАГИ ПОДГОТОВКИ КАТЕГОРИЙ
-        
-        # 1. Получаем ВСЕ категории из БД
         all_categories = await self.get_all_categories_from_db(db)
         
         if not all_categories:
@@ -234,7 +226,6 @@ class LabirintScraper(BaseScraper):
         self.logger.info(f"Основная категория: '{default_category.name}' (ID: {default_category_id})")
         self.logger.info(f"Бренд для всех продуктов: '{self.brand_name}' (ID: {brand_id})")
         
-        # ПАРСИНГ И СОЗДАНИЕ ПРОДУКТОВ
         products_to_classify = []
         
         for url in catalog_urls:

@@ -11,6 +11,7 @@ import requests
 from sqlalchemy import func, insert, or_, select, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.scrapers.door_synonyms import DOOR_PATTERNS, DOOR_SYNONYMS, MORPHOLOGY_VARIANTS
 from app.utils.text_utils import generate_slug
 from app.models.catalog import Catalog
 from app.models.category import Category
@@ -43,6 +44,10 @@ class BaseScraper:
         self.headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
         }
+
+        # Кэш для категорий и их ключевых слов
+        self._categories_cache = None
+        self._category_patterns_cache = None
         
     # ---------- Методы работы с HTTP и HTML ----------
     
@@ -164,7 +169,6 @@ class BaseScraper:
         
         return brand.id
     
-    # В файле app/scrapers/base_scraper.py исправить метод get_or_create_catalog:
 
     async def get_or_create_catalog(self, db: AsyncSession, catalog_name: str, catalog_slug: str, brand_id: int) -> Catalog:
         """
@@ -231,17 +235,10 @@ class BaseScraper:
         
         return catalog
 
-    # НОВЫЙ МЕТОД: Проверка существования каталога
     async def verify_catalog_exists(self, db: AsyncSession, catalog_id: int) -> bool:
         """
         Проверяет, что каталог с указанным ID существует в базе данных
         
-        Args:
-            db: Сессия базы данных
-            catalog_id: ID каталога
-            
-        Returns:
-            bool: True если каталог существует
         """
         result = await db.execute(select(func.count(Catalog.id)).where(Catalog.id == catalog_id))
         count = result.scalar_one()
@@ -258,9 +255,6 @@ class BaseScraper:
         """
         Обновляет brand_id для всех каталогов бренда, у которых он не установлен
         
-        Args:
-            db: Сессия базы данных
-            brand_id: ID бренда
         """
         # Получаем все каталоги без привязки к бренду
         result = await db.execute(
@@ -296,11 +290,6 @@ class BaseScraper:
         """
         Добавляет продукт в указанную категорию
         
-        Args:
-            db: Сессия базы данных
-            product_id: ID продукта
-            category_id: ID категории
-            is_primary: Является ли категория основной для продукта
         """
         # Проверяем, есть ли товар в категории
         result = await db.execute(
@@ -359,15 +348,11 @@ class BaseScraper:
     
     async def get_all_categories_from_db(self, db: AsyncSession) -> Dict[str, Dict]:
         """
-        Получает все активные категории из базы данных
-        Категории общие для всех брендов, бренд устанавливается только для продуктов
-        
-        Args:
-            db: Сессия базы данных
-            
-        Returns:
-            Dict[str, Dict]: Словарь категорий с их данными
+        УЛУЧШЕНО: Получает все активные категории из базы данных с кэшированием
         """
+        if self._categories_cache is not None:
+            return self._categories_cache
+        
         result = await db.execute(
             select(Category).where(Category.is_active == True)
         )
@@ -376,17 +361,21 @@ class BaseScraper:
         category_map = {}
         for category in categories:
             # Генерируем ключевые слова из названия категории и её атрибутов
-            keywords = self._generate_category_keywords(category)
+            keywords, patterns = self._generate_enhanced_category_keywords(category)
             
             category_map[category.name.lower()] = {
                 'id': category.id,
                 'name': category.name,
                 'slug': category.slug,
                 'keywords': keywords,
+                'patterns': patterns,
                 'is_default': self._is_default_category(category.name)
             }
         
-        self.logger.info(f"Загружено {len(category_map)} общих категорий для классификации")
+        # Кэшируем результат
+        self._categories_cache = category_map
+        
+        self.logger.info(f"Загружено {len(category_map)} категорий для классификации")
         
         # Логируем категории для отладки
         for name, data in category_map.items():
@@ -395,23 +384,17 @@ class BaseScraper:
         
         return category_map
     
-    def _generate_category_keywords(self, category: Category) -> List[str]:
-        """
-        Генерирует ключевые слова для категории на основе её данных
-        
-        Args:
-            category: Объект категории
-            
-        Returns:
-            List[str]: Список ключевых слов
-        """
+    def _generate_enhanced_category_keywords(self, category: Category) -> Tuple[List[str], List[str]]:
+        """ генерация ключевых слов и паттернов для категории"""
         keywords = set()
+        patterns = []
         
         # Добавляем само название категории
-        keywords.add(category.name.lower())
+        category_name_lower = category.name.lower()
+        keywords.add(category_name_lower)
         
         # Разбиваем название на отдельные слова
-        name_words = category.name.lower().split()
+        name_words = category_name_lower.split()
         keywords.update(name_words)
         
         # Добавляем slug (если есть)
@@ -424,58 +407,84 @@ class BaseScraper:
             meta_words = [kw.strip().lower() for kw in category.meta_keywords.split(',')]
             keywords.update(meta_words)
         
-        # Специальные правила для разных типов категорий
-        category_name_lower = category.name.lower()
+        # НОВОЕ: Специальные правила с морфологией и синонимами
+        category_synonyms = self._get_category_synonyms(category_name_lower)
+        keywords.update(category_synonyms)
         
-        if 'металлические' in category_name_lower or 'металлическая' in category_name_lower:
-            keywords.update(['металл', 'стальные', 'стальная', 'железные', 'железная'])
-        
-        if 'входные' in category_name_lower or 'входная' in category_name_lower:
-            keywords.update(['уличная', 'наружная', 'внешняя', 'фасадная'])
-        
-        if 'межкомнатные' in category_name_lower or 'межкомнатная' in category_name_lower:
-            keywords.update(['внутренняя', 'комнатная', 'интерьерная'])
-        
-        if 'деревянные' in category_name_lower or 'деревянная' in category_name_lower:
-            keywords.update(['дерево', 'древесина', 'массив', 'шпон'])
-        
-        if 'стеклянные' in category_name_lower or 'стеклянная' in category_name_lower:
-            keywords.update(['стекло', 'остекленные', 'остекленная'])
-        
-        if 'белые' in category_name_lower or 'белая' in category_name_lower:
-            keywords.update(['белый', 'белого цвета', 'светлые', 'светлая'])
-        
-        if 'черные' in category_name_lower or 'черная' in category_name_lower:
-            keywords.update(['черный', 'черного цвета', 'темные', 'темная'])
+        # НОВОЕ: Генерируем паттерны для более гибкого поиска
+        category_patterns = self._generate_category_patterns(category_name_lower)
+        patterns.extend(category_patterns)
         
         # Убираем пустые строки и очень короткие слова
         keywords = {kw for kw in keywords if kw and len(kw) > 1}
         
-        return list(keywords)
+        return list(keywords), patterns
+    
+    def _get_category_synonyms(self, category_name: str) -> Set[str]:
+        """
+        НОВОЕ: Получает синонимы и морфологические варианты для категории
+        """
+        synonyms = set()
+        
+        # Добавляем синонимы для найденных слов
+        for word in category_name.split():
+            word_lower = word.lower()
+            if word_lower in DOOR_SYNONYMS:
+                synonyms.update(DOOR_SYNONYMS[word_lower])
+        
+        # Также проверяем полное название категории
+        category_lower = category_name.lower()
+        if category_lower in DOOR_SYNONYMS:
+            synonyms.update(DOOR_SYNONYMS[category_lower])
+        
+        # Добавляем морфологические варианты
+        for word in category_name.split():
+            word_lower = word.lower()
+            if word_lower in MORPHOLOGY_VARIANTS:
+                synonyms.update(MORPHOLOGY_VARIANTS[word_lower])
+        
+        return synonyms
+    
+    def _generate_category_patterns(self, category_name: str) -> List[str]:
+        """
+        НОВОЕ: Генерирует регулярные выражения для более гибкого поиска
+        """
+        patterns = []
+        
+        # Паттерн для поиска слов с возможными окончаниями
+        words = category_name.split()
+        
+        for word in words:
+            if len(word) >= 4:  # Только для слов длиннее 3 символов
+                # Создаем паттерн, который ищет корень слова + любые окончания
+                root = word[:len(word)-2]  # Берем корень без последних 2 символов
+                pattern = rf'\b{re.escape(root)}\w*\b'
+                patterns.append(pattern)
+        
+        # Добавляем специальные паттерны, если они подходят к категории
+        category_lower = category_name.lower()
+        for key, patterns_list in DOOR_PATTERNS.items():
+            if key in category_lower:
+                patterns.extend(patterns_list)
+        
+        # Дополнительно проверяем отдельные слова категории
+        for word in words:
+            word_lower = word.lower()
+            for key, patterns_list in DOOR_PATTERNS.items():
+                if key in word_lower or word_lower.startswith(key[:4]):
+                    patterns.extend(patterns_list)
+                    break
+        
+        return patterns
     
     def _is_default_category(self, category_name: str) -> bool:
-        """
-        Определяет, является ли категория категорией по умолчанию
-        
-        Args:
-            category_name: Название категории
-            
-        Returns:
-            bool: True если это категория по умолчанию
-        """
+        """Определяет, является ли категория категорией по умолчанию """
         default_names = ['все двери', 'все товары', 'общие', 'основные', 'default']
         return any(default in category_name.lower() for default in default_names)
     
     async def get_default_category(self, db: AsyncSession) -> Optional[Category]:
         """
-        Получает общую категорию "Все двери"
-        Категории общие для всех брендов
-        
-        Args:
-            db: Сессия базы данных
-            
-        Returns:
-            Category или None
+        Получает общую категорию "Все двери" 
         """
         # Приоритет 1: Ищем "Все двери"
         result = await db.execute(
@@ -513,19 +522,17 @@ class BaseScraper:
     async def classify_product_to_categories(self, 
                                            product_text: str, 
                                            all_categories: Dict[str, Dict],
-                                           min_matches: int = 1) -> List[Dict]:
+                                           min_matches: int = 1,
+                                           debug_product_name: str = "") -> List[Dict]:
         """
-        Классифицирует продукт по категориям на основе текста
+        УЛУЧШЕНО: Классифицирует продукт по категориям с улучшенным алгоритмом
+        """
+        # Нормализуем текст для лучшего поиска
+        normalized_text = self.normalize_text_for_classification(product_text)
         
-        Args:
-            product_text: Полный текст продукта для анализа
-            all_categories: Все доступные категории с ключевыми словами
-            min_matches: Минимальное количество совпадений для включения в категорию
-            
-        Returns:
-            List[Dict]: Список подходящих категорий с весами
-        """
-        text_lower = product_text.lower()
+        self.logger.debug(f"=== КЛАССИФИКАЦИЯ ПРОДУКТА: {debug_product_name} ===")
+        self.logger.debug(f"Нормализованный текст (первые 200 символов): {normalized_text[:200]}...")
+        
         matched_categories = []
         
         for category_name, category_data in all_categories.items():
@@ -534,15 +541,19 @@ class BaseScraper:
                 continue
             
             keywords = category_data.get('keywords', [])
-            if not keywords:
+            patterns = category_data.get('patterns', [])
+            
+            if not keywords and not patterns:
                 continue
             
             matches = 0
             matched_keywords = []
+            matched_patterns = []
             total_weight = 0
             
+            # Ищем совпадения по ключевым словам
             for keyword in keywords:
-                if keyword in text_lower:
+                if keyword in normalized_text:
                     matches += 1
                     matched_keywords.append(keyword)
                     
@@ -553,7 +564,23 @@ class BaseScraper:
                     if len(keyword.split()) > 1:
                         word_weight *= 1.5
                     
+                    # Бонус за точное совпадение названия категории
+                    if keyword == category_name:
+                        word_weight *= 2.0
+                    
                     total_weight += word_weight
+            
+            # НОВОЕ: Ищем совпадения по регулярным выражениям
+            for pattern in patterns:
+                try:
+                    matches_found = re.findall(pattern, normalized_text, re.IGNORECASE)
+                    if matches_found:
+                        matches += len(matches_found)
+                        matched_patterns.extend(matches_found)
+                        # Паттерны получают больший вес
+                        total_weight += len(matches_found) * 1.5
+                except re.error:
+                    self.logger.warning(f"Некорректный регулярный паттерн: {pattern}")
             
             # Если достаточно совпадений, добавляем категорию
             if matches >= min_matches:
@@ -563,29 +590,49 @@ class BaseScraper:
                     'slug': category_data['slug'],
                     'weight': total_weight,
                     'matches': matches,
-                    'matched_keywords': matched_keywords
+                    'matched_keywords': matched_keywords,
+                    'matched_patterns': matched_patterns
                 })
+                
+                self.logger.debug(
+                    f"Найдена категория '{category_data['name']}': "
+                    f"вес={total_weight:.2f}, совпадений={matches}, "
+                    f"ключевые слова={matched_keywords}, "
+                    f"паттерны={matched_patterns}"
+                )
         
         # Сортируем по весу (по убыванию)
         matched_categories.sort(key=lambda x: x['weight'], reverse=True)
         
+        self.logger.info(
+            f"Классификация завершена для '{debug_product_name}': "
+            f"найдено {len(matched_categories)} подходящих категорий"
+        )
+        
+        if not matched_categories:
+            self.logger.warning(
+                f"Продукт '{debug_product_name}' не классифицирован ни в одну категорию. "
+                f"Текст: {normalized_text[:100]}..."
+            )
+        else:
+            # Показываем топ-3 категории
+            top_categories = matched_categories[:3]
+            for i, cat in enumerate(top_categories, 1):
+                self.logger.info(
+                    f"  {i}. {cat['name']} (вес: {cat['weight']:.2f}, "
+                    f"совпадений: {cat['matches']})"
+                )
+        
         return matched_categories
     
-    # Исправление для базового класса BaseScraper
-
     async def assign_product_to_all_categories(self, 
                                          db: AsyncSession, 
                                          product_id: int,
                                          default_category_id: int,
-                                         additional_categories: List[Dict]) -> None:
+                                         additional_categories: List[Dict],
+                                         max_additional_categories: int = 5) -> None:
         """
-        ИСПРАВЛЕНО: Назначает продукт в категорию "Все двери" и дополнительные категории
-        
-        Args:
-            db: Сессия базы данных
-            product_id: ID продукта
-            default_category_id: ID категории "Все двери"
-            additional_categories: Дополнительные категории для назначения
+        УЛУЧШЕНО: Назначает продукт в категории с ограничением количества
         """
         # Удаляем все существующие связи продукта с категориями
         stmt = delete(product_categories).where(product_categories.c.product_id == product_id)
@@ -599,9 +646,10 @@ class BaseScraper:
         
         self.logger.info(f"Продукт {product_id} добавлен в основную категорию 'Все двери' (ID: {default_category_id})")
         
-        # 2. Добавляем в дополнительные категории
-        for category_info in additional_categories:
-            # ИСПРАВЛЕНО: Правильно извлекаем ID из словаря
+        # 2. Добавляем в дополнительные категории (ограничиваем количество)
+        categories_to_add = additional_categories[:max_additional_categories]
+        
+        for category_info in categories_to_add:
             category_id = category_info['id']
             category_name = category_info['name']
             
@@ -618,8 +666,7 @@ class BaseScraper:
             
             self.logger.info(
                 f"Продукт {product_id} добавлен в дополнительную категорию '{category_name}' "
-                f"(вес: {category_info['weight']:.2f}, совпадений: {category_info['matches']}, "
-                f"ключевые слова: {', '.join(category_info['matched_keywords'][:3])})"
+                f"(вес: {category_info['weight']:.2f}, совпадений: {category_info['matches']})"
             )
         
         await db.flush()
@@ -635,6 +682,35 @@ class BaseScraper:
         self.logger.debug(f"Очищены все категории для продукта {product_id}")
 
     # ---------- Основной метод парсинга ----------
+
+    def normalize_text_for_classification(self, text: str) -> str:
+        """
+        НОВОЕ: Нормализует текст для лучшего сопоставления с категориями
+        """
+        if not text:
+            return ""
+        
+        # Приводим к нижнему регистру
+        normalized = text.lower()
+        
+        # Удаляем лишние пробелы и переносы строк
+        normalized = re.sub(r'\s+', ' ', normalized)
+        
+        # Заменяем некоторые символы для лучшего поиска
+        replacements = {
+            'ё': 'е',
+            '—': '-',
+            '–': '-',
+            '"': '"',
+            '"': '"',
+            ''': "'",
+            ''': "'",
+        }
+        
+        for old, new in replacements.items():
+            normalized = normalized.replace(old, new)
+        
+        return normalized.strip()
     
     async def parse_multiple_catalogs(self, catalog_urls: List[str], db: AsyncSession) -> int:
         """
@@ -659,3 +735,53 @@ class BaseScraper:
         
         # Ограничиваем длину
         return main_description[:500]
+    
+    # ---------- МЕТОДЫ ДИАГНОСТИКИ ----------
+    
+    async def diagnose_categorization_issues(self, db: AsyncSession, sample_products: List[Dict]) -> None:
+        """
+        НОВОЕ: Диагностирует проблемы с категоризацией на примере продуктов
+        
+        Args:
+            db: Сессия базы данных  
+            sample_products: Список продуктов для диагностики
+                            [{'name': str, 'description': str}, ...]
+        """
+        self.logger.info("=== ДИАГНОСТИКА СИСТЕМЫ КАТЕГОРИЗАЦИИ ===")
+        
+        # Загружаем категории
+        all_categories = await self.get_all_categories_from_db(db)
+        default_category = await self.get_default_category(db)
+        
+        self.logger.info(f"Всего категорий: {len(all_categories)}")
+        self.logger.info(f"Категория по умолчанию: {default_category.name if default_category else 'НЕ НАЙДЕНА'}")
+        
+        # Анализируем каждый продукт
+        total_classified = 0
+        total_unclassified = 0
+        
+        for product in sample_products[:10]:  # Ограничиваем до 10 продуктов
+            product_text = f"{product.get('name', '')} {product.get('description', '')}"
+            
+            matched_categories = await self.classify_product_to_categories(
+                product_text, 
+                all_categories,
+                debug_product_name=product.get('name', 'Без названия')
+            )
+            
+            if matched_categories:
+                total_classified += 1
+            else:
+                total_unclassified += 1
+        
+        # Итоговая статистика
+        self.logger.info(f"=== РЕЗУЛЬТАТЫ ДИАГНОСТИКИ ===")
+        self.logger.info(f"Классифицировано продуктов: {total_classified}")
+        self.logger.info(f"Не классифицировано продуктов: {total_unclassified}")
+        
+        if total_unclassified > 0:
+            self.logger.warning("Обнаружены проблемы с категоризацией!")
+            self.logger.warning("Рекомендации:")
+            self.logger.warning("1. Проверьте ключевые слова категорий")
+            self.logger.warning("2. Добавьте больше синонимов")
+            self.logger.warning("3. Улучшите описания продуктов")
