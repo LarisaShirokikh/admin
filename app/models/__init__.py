@@ -15,6 +15,7 @@ from .product_video import ProductVideo
 from .product_ranking import ProductRanking
 from .user import User
 from .analytics import AnalyticsEvent, AnalyticsSession, AnalyticsDailySummary
+from .admin import AdminUser
 
 # Импорт связующих таблиц
 from .attributes import product_categories
@@ -37,5 +38,6 @@ __all__ = [
     "User",
     "AnalyticsEvent",
     "AnalyticsSession",
-    "AnalyticsDailySummary"
+    "AnalyticsDailySummary",
+    "AdminUser"
 ]

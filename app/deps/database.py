@@ -1,3 +1,4 @@
+# app/deps/database.py
 from app.core.database import AsyncSessionLocal
 
 async def get_db():

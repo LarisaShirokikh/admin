@@ -23,7 +23,7 @@ services:
     env_file:
       - .env
     ports:
-      - "8002:8000"
+      - "8000:8000"
     networks:
       - backend
 
