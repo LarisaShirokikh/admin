@@ -466,9 +466,25 @@ class IntecronScraper(BaseScraper):
         # Обновляем существующие каталоги, чтобы привязать их к бренду
         await self.update_catalogs_brand_id(db, brand_id)
         
-        # Получаем или создаем категорию "все двери"
-        all_doors_category = await self.get_or_create_default_category(db, brand_id)
-        all_doors_category_id = all_doors_category.id
+        # 1. Получаем все активные категории (как в Лабиринте)
+        all_categories = await self.get_all_categories_from_db(db)
+        
+        if not all_categories:
+            self.logger.error("В базе данных нет активных категорий!")
+            return 0
+        
+        self.logger.info(f"Найдено {len(all_categories)} активных категорий в БД")
+        
+        # 2. Получаем обязательную категорию "Все двери" (как в Лабиринте)
+        default_category = await self.get_default_category(db)
+        
+        if not default_category:
+            self.logger.error("Не найдена категория 'Все двери' или аналогичная!")
+            return 0
+        
+        default_category_id = default_category.id
+        self.logger.info(f"Основная категория: '{default_category.name}' (ID: {default_category_id})")
+        self.logger.info(f"Бренд для всех продуктов: '{self.brand_name}' (ID: {brand_id})")
         
         # Собираем продукты для последующей классификации
         products_to_classify = []
@@ -495,19 +511,15 @@ class IntecronScraper(BaseScraper):
                         created_product = await create_or_update_product(db, product_in)
                         
                         if created_product:
-                            # Сразу добавляем товар в категорию "все двери"
-                            await self.add_product_to_category(db, created_product.id, all_doors_category_id)
+                            # Собираем ВЕСЬ текст для анализа категорий (как в Лабиринте)
+                            analysis_text = self._prepare_product_text_for_analysis(product_in)
                             
-                            # Собираем текст для дополнительной классификации
-                            text_to_analyze = f"{product_in.name} {product_in.description}"
-                            
-                            # Добавляем характеристики продукта в текст для анализа
-                            if product_in.characteristics:
-                                for key, value in product_in.characteristics.items():
-                                    text_to_analyze += f" {key} {value}"
-                            
-                            # Добавляем в список для дополнительной классификации
-                            products_to_classify.append((created_product.id, text_to_analyze))
+                            # Добавляем в очередь для классификации
+                            products_to_classify.append({
+                                'product_id': created_product.id,
+                                'text': analysis_text,
+                                'name': product_in.name
+                            })
                             
                             # Увеличиваем счетчики
                             total_products += 1
@@ -540,27 +552,56 @@ class IntecronScraper(BaseScraper):
             await db.rollback()
             return 0
 
-        # Дополнительно классифицируем продукты по другим категориям
+        # КЛАССИФИКАЦИЯ ПО КАТЕГОРИЯМ (как в Лабиринте)
         if products_to_classify:
+            self.logger.info(f"Начинаем классификацию {len(products_to_classify)} продуктов")
+            
+            classified_count = 0
+            
+            for product_info in products_to_classify:
+                try:
+                    product_id = product_info['product_id']
+                    product_text = product_info['text']
+                    product_name = product_info['name']
+                    
+                    # Находим подходящие дополнительные категории
+                    additional_categories = await self.classify_product_to_categories(
+                        product_text, 
+                        all_categories,
+                        min_matches=1  # Минимум 1 совпадение
+                    )
+                    
+                    # Назначаем продукт в категории (обязательно в "Все двери" + дополнительные)
+                    await self.assign_product_to_all_categories(
+                        db,
+                        product_id,
+                        default_category_id,
+                        additional_categories
+                    )
+                    
+                    classified_count += 1
+                    
+                    # Логируем результат классификации
+                    additional_names = [cat['name'] for cat in additional_categories[:3]]  # Первые 3
+                    self.logger.debug(f"Продукт '{product_name}' -> Все двери + {additional_names}")
+                    
+                except Exception as e:
+                    self.logger.error(f"Ошибка при классификации продукта {product_info.get('name', 'Unknown')}: {e}")
+                    continue
+            
+            # Коммитим все изменения по категориям
             try:
-                # Используем уже полученный brand_id вместо повторного вызова ensure_brand_exists
-                await self.ensure_categories_exist(db, brand_id)
-                category_map = await self.get_category_map(db)
-                
-                # Классифицируем продукты (добавляем в дополнительные категории)
-                for product_id, text_to_analyze in products_to_classify:
-                    await self.classify_product_additional_categories(db, product_id, text_to_analyze, category_map)
-                
-                # Коммитим все изменения по классификации
                 await db.commit()
+                self.logger.info(f"Успешно классифицировано {classified_count} продуктов")
                 
                 # Обновляем счетчики товаров в категориях
                 await self.update_category_counters(db)
                 
             except Exception as e:
-                self.logger.error(f"[SCRAPER] Ошибка при классификации продуктов: {e}", exc_info=True)
-                # Ошибка классификации не должна блокировать успешное добавление продуктов
+                self.logger.error(f"Ошибка при сохранении классификации: {e}", exc_info=True)
                 await db.rollback()
 
-        self.logger.info(f"Создано и обновлено {total_products} товаров (новых: {new_products}, обновлено: {updated_products})")
+        self.logger.info(f"ИТОГО: {total_products} товаров (новых: {new_products}, обновлено: {updated_products})")
         return total_products
+
+    

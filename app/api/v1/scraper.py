@@ -3,6 +3,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 from pydantic import BaseModel, HttpUrl
 from typing import List, Optional
 from app.core.database import AsyncSessionLocal
+from app.crud.scraper import check_categories_exist, check_scraping_limits, register_task, unregister_task
 from app.worker.tasks import (
     scrape_bunker_doors_multiple_catalogs_task,
     scrape_intecron_multiple_catalogs_task, 
@@ -15,13 +16,10 @@ from app.deps.admin_auth import get_current_active_admin, get_current_superuser,
 from app.models.admin import AdminUser
 from datetime import datetime, timedelta
 from collections import defaultdict
+from app.core.config import settings, active_scraping_tasks
 
 router = APIRouter()
 
-# Глобальный счетчик активных задач скрапинга (в продакшене лучше использовать Redis)
-active_scraping_tasks = defaultdict(int)
-MAX_CONCURRENT_TASKS_PER_USER = 2
-MAX_CONCURRENT_TASKS_GLOBAL = 5
 
 class ScraperRequest(BaseModel):
     """Запрос на парсинг каталогов"""
@@ -42,37 +40,8 @@ class ScraperStatus(BaseModel):
     result: Optional[dict] = None
     error: Optional[str] = None
 
-def check_scraping_limits(current_user: AdminUser) -> None:
-    """Проверка лимитов на количество одновременных задач скрапинга"""
-    user_tasks = active_scraping_tasks[current_user.username]
-    total_tasks = sum(active_scraping_tasks.values())
-    
-    if user_tasks >= MAX_CONCURRENT_TASKS_PER_USER:
-        raise HTTPException(
-            status_code=429,
-            detail=f"Превышен лимит задач на пользователя ({MAX_CONCURRENT_TASKS_PER_USER}). "
-                   f"Дождитесь завершения текущих задач."
-        )
-    
-    if total_tasks >= MAX_CONCURRENT_TASKS_GLOBAL:
-        raise HTTPException(
-            status_code=429,
-            detail=f"Превышен глобальный лимит задач ({MAX_CONCURRENT_TASKS_GLOBAL}). "
-                   f"Попробуйте позже."
-        )
 
-def register_task(current_user: AdminUser, task_id: str) -> None:
-    """Регистрация новой задачи"""
-    active_scraping_tasks[current_user.username] += 1
-    print(f"TASK_REGISTERED: {task_id} by {current_user.username}. "
-          f"User tasks: {active_scraping_tasks[current_user.username]}, "
-          f"Total: {sum(active_scraping_tasks.values())}")
 
-def unregister_task(current_user: AdminUser, task_id: str) -> None:
-    """Снятие задачи с учета"""
-    if active_scraping_tasks[current_user.username] > 0:
-        active_scraping_tasks[current_user.username] -= 1
-    print(f"TASK_UNREGISTERED: {task_id} by {current_user.username}")
 
 # ========== СКРАПИНГ ЛАБИРИНТ ==========
 
@@ -92,6 +61,40 @@ async def scrape_catalogs(
     if not scraper_request.catalog_urls:
         raise HTTPException(status_code=400, detail="Необходимо указать хотя бы один URL каталога")
     
+    # НОВАЯ ПРОВЕРКА: Проверяем наличие категорий ПЕРЕД запуском
+    print(f"[SCRAPER] Checking categories before starting Labirint scraping...")
+    categories_info = await check_categories_exist()
+    
+    if not categories_info["has_categories"]:
+        error_detail = {
+            "error_code": "NO_CATEGORIES",
+            "message": "Для работы скрайпера необходимо создать активные категории товаров",
+            "details": {
+                "active_categories": categories_info["active_categories"],
+                "total_categories": categories_info["total_categories"],
+                "instructions": [
+                    "Перейдите в раздел 'Категории' в админ-панели",
+                    "Создайте как минимум одну категорию (например: 'Все двери')",
+                    "Убедитесь что категория активна (галочка 'Активна')",
+                    "Повторите запуск скрайпера"
+                ],
+                "suggested_categories": [
+                    "Все двери",
+                    "Входные двери", 
+                    "Металлические двери",
+                    "Межкомнатные двери"
+                ]
+            }
+        }
+        
+        print(f"[SCRAPER] Categories check failed: {categories_info}")
+        raise HTTPException(
+            status_code=422,  # Unprocessable Entity - более подходящий код
+            detail=error_detail
+        )
+    
+    print(f"[SCRAPER] Categories check passed: {categories_info['active_categories']} active categories found")
+    
     # Проверяем лимиты на одновременные задачи
     check_scraping_limits(current_user)
     
@@ -110,6 +113,7 @@ async def scrape_catalogs(
         # КРИТИЧЕСКОЕ ДЕЙСТВИЕ - подробное логирование
         print(f"CRITICAL_SCRAPING: Admin {current_user.username} starting Labirint scraping")
         print(f"URLs: {valid_urls}")
+        print(f"Categories available: {categories_info['active_categories']}")
         
         # Запускаем задачу Celery
         task = scrape_labirint_multiple_catalogs_task.delay(valid_urls)
@@ -121,7 +125,8 @@ async def scrape_catalogs(
         
         return ScraperResponse(
             task_id=task.id,
-            message=f"Задача парсинга {len(valid_urls)} каталогов Лабиринт запущена успешно",
+            message=f"Задача парсинга {len(valid_urls)} каталогов Лабиринт запущена успешно. "
+                   f"Найдено {categories_info['active_categories']} активных категорий.",
             initiated_by=current_user.username,
             urls_count=len(valid_urls)
         )
@@ -132,6 +137,7 @@ async def scrape_catalogs(
             status_code=500,
             detail=f"Ошибка запуска задачи: {str(e)}"
         )
+
 
 # ========== СКРАПИНГ BUNKER DOORS ==========
 
@@ -146,10 +152,45 @@ async def scrape_bunker_doors_catalogs(
     ТРЕБУЕТ: Права админа + строгий rate limiting
     """
     # КРИТИЧЕСКИ СТРОГИЙ rate limiting
-    check_admin_rate_limit(request, max_requests=3, window_minutes=10)
+    check_admin_rate_limit(request, max_requests=300, window_minutes=10)
     
     if not scraper_request.catalog_urls:
         raise HTTPException(status_code=400, detail="Необходимо указать хотя бы один URL каталога")
+    
+    print(f"[SCRAPER] Checking categories before starting Bunker scraping...")
+    categories_info = await check_categories_exist()
+
+    print(f"[SCRAPER] Checking categories before starting Bunker scraping...")
+    categories_info = await check_categories_exist()
+    
+    if not categories_info["has_categories"]:
+        error_detail = {
+            "error_code": "NO_CATEGORIES",
+            "message": "Для работы скрайпера необходимо создать активные категории товаров",
+            "details": {
+                "active_categories": categories_info["active_categories"],
+                "total_categories": categories_info["total_categories"],
+                "instructions": [
+                    "Перейдите в раздел 'Категории' в админ-панели",
+                    "Создайте как минимум одну категорию (например: 'Все двери')",
+                    "Убедитесь что категория активна (галочка 'Активна')",
+                    "Повторите запуск скрайпера"
+                ],
+                "suggested_categories": [
+                    "Все двери",
+                    "Входные двери", 
+                    "Металлические двери"
+                ]
+            }
+        }
+        
+        print(f"[SCRAPER] Categories check failed: {categories_info}")
+        raise HTTPException(
+            status_code=422,  # Unprocessable Entity - более подходящий код
+            detail=error_detail
+        )
+    
+    print(f"[SCRAPER] Categories check passed: {categories_info['active_categories']} active categories found")
     
     # Проверяем лимиты на одновременные задачи
     check_scraping_limits(current_user)
@@ -221,6 +262,41 @@ async def scrape_intecron_catalogs(
     if not scraper_request.catalog_urls:
         raise HTTPException(status_code=400, detail="Необходимо указать хотя бы один URL каталога")
     
+    # НОВАЯ ПРОВЕРКА: Проверяем наличие категорий ПЕРЕД запуском
+    print(f"[SCRAPER] Checking categories before starting Labirint scraping...")
+    categories_info = await check_categories_exist()
+    
+    if not categories_info["has_categories"]:
+        error_detail = {
+            "error_code": "NO_CATEGORIES",
+            "message": "Для работы скрайпера необходимо создать активные категории товаров",
+            "details": {
+                "active_categories": categories_info["active_categories"],
+                "total_categories": categories_info["total_categories"],
+                "instructions": [
+                    "Перейдите в раздел 'Категории' в админ-панели",
+                    "Создайте как минимум одну категорию (например: 'Все двери')",
+                    "Убедитесь что категория активна (галочка 'Активна')",
+                    "Повторите запуск скрайпера"
+                ],
+                "suggested_categories": [
+                    "Все двери",
+                    "Входные двери", 
+                    "Металлические двери",
+                    "Межкомнатные двери"
+                ]
+            }
+        }
+        
+        print(f"[SCRAPER] Categories check failed: {categories_info}")
+        raise HTTPException(
+            status_code=422,  # Unprocessable Entity - более подходящий код
+            detail=error_detail
+        )
+    
+    print(f"[SCRAPER] Categories check passed: {categories_info['active_categories']} active categories found")
+    
+
     # Проверяем лимиты на одновременные задачи
     check_scraping_limits(current_user)
     
@@ -294,6 +370,41 @@ async def scrape_as_doors_catalogs(
     if not scraper_request.catalog_urls:
         raise HTTPException(status_code=400, detail="Необходимо указать хотя бы один URL каталога")
     
+    # НОВАЯ ПРОВЕРКА: Проверяем наличие категорий ПЕРЕД запуском
+    print(f"[SCRAPER] Checking categories before starting Labirint scraping...")
+    categories_info = await check_categories_exist()
+    
+    if not categories_info["has_categories"]:
+        error_detail = {
+            "error_code": "NO_CATEGORIES",
+            "message": "Для работы скрайпера необходимо создать активные категории товаров",
+            "details": {
+                "active_categories": categories_info["active_categories"],
+                "total_categories": categories_info["total_categories"],
+                "instructions": [
+                    "Перейдите в раздел 'Категории' в админ-панели",
+                    "Создайте как минимум одну категорию (например: 'Все двери')",
+                    "Убедитесь что категория активна (галочка 'Активна')",
+                    "Повторите запуск скрайпера"
+                ],
+                "suggested_categories": [
+                    "Все двери",
+                    "Входные двери", 
+                    "Металлические двери",
+                    "Межкомнатные двери"
+                ]
+            }
+        }
+        
+        print(f"[SCRAPER] Categories check failed: {categories_info}")
+        raise HTTPException(
+            status_code=422,  # Unprocessable Entity - более подходящий код
+            detail=error_detail
+        )
+    
+    print(f"[SCRAPER] Categories check passed: {categories_info['active_categories']} active categories found")
+    
+
     # Проверяем лимиты на одновременные задачи
     check_scraping_limits(current_user)
     
@@ -400,14 +511,15 @@ async def get_active_tasks(
     """
     Получить информацию об активных задачах скрапинга (только для суперадмина)
     """
-    check_admin_rate_limit(request, max_requests=10, window_minutes=1)
-    
+    # check_admin_rate_limit(request, max_requests=10, window_minutes=1)
+    if not current_user.is_superuser:
+        raise HTTPException(status_code=403, detail="Доступ запрещен. Только суперадмин может просматривать активные задачи.")
     total_tasks = sum(active_scraping_tasks.values())
     
     return {
         "total_active_tasks": total_tasks,
-        "max_global_limit": MAX_CONCURRENT_TASKS_GLOBAL,
-        "max_user_limit": MAX_CONCURRENT_TASKS_PER_USER,
+        "max_global_limit": settings.MAX_CONCURRENT_TASKS_GLOBAL,
+        "max_user_limit": settings.MAX_CONCURRENT_TASKS_PER_USER,
         "tasks_by_user": dict(active_scraping_tasks),
         "requested_by": current_user.username,
         "timestamp": datetime.utcnow()
@@ -421,7 +533,7 @@ async def cancel_all_tasks(
     """
     ЭКСТРЕННАЯ ОСТАНОВКА всех задач скрапинга (только суперадмин)
     """
-    check_admin_rate_limit(request, max_requests=5, window_minutes=5)
+    # check_admin_rate_limit(request, max_requests=5, window_minutes=5)
     
     # КРИТИЧЕСКОЕ ДЕЙСТВИЕ
     print(f"EMERGENCY: Superuser {current_user.username} cancelling ALL scraping tasks")
@@ -438,3 +550,54 @@ async def cancel_all_tasks(
         "cancelled_by": current_user.username,
         "timestamp": datetime.utcnow()
     }
+
+@router.get("/check-readiness")
+async def check_scraper_readiness(
+    request: Request,
+    current_user: AdminUser = Depends(get_current_active_admin)
+):
+    """
+    Проверяет готовность системы к запуску скрайперов
+    """
+    # check_admin_rate_limit(request, max_requests=10, window_minutes=1)
+    
+    categories_info = await check_categories_exist()
+    user_tasks = active_scraping_tasks[current_user.username]
+    total_tasks = sum(active_scraping_tasks.values())
+    
+    readiness = {
+        "ready": categories_info["has_categories"] and user_tasks < settings.MAX_CONCURRENT_TASKS_PER_USER,
+        "categories": categories_info,
+        "limits": {
+            "user_tasks": user_tasks,
+            "max_user_tasks": settings.MAX_CONCURRENT_TASKS_PER_USER,
+            "total_tasks": total_tasks,
+            "max_total_tasks": settings.MAX_CONCURRENT_TASKS_GLOBAL,
+            "can_start_task": user_tasks < settings.MAX_CONCURRENT_TASKS_PER_USER and total_tasks < settings.MAX_CONCURRENT_TASKS_GLOBAL
+        },
+        "issues": []
+    }
+    
+    # Добавляем список проблем
+    if not categories_info["has_categories"]:
+        readiness["issues"].append({
+            "type": "no_categories",
+            "message": "Нет активных категорий товаров",
+            "action": "Создайте категории в разделе 'Категории'"
+        })
+    
+    if user_tasks >= settings.MAX_CONCURRENT_TASKS_PER_USER:
+        readiness["issues"].append({
+            "type": "user_limit",
+            "message": f"Превышен лимит задач на пользователя ({user_tasks}/{settings.MAX_CONCURRENT_TASKS_PER_USER})",
+            "action": "Дождитесь завершения текущих задач"
+        })
+    
+    if total_tasks >= settings.MAX_CONCURRENT_TASKS_GLOBAL:
+        readiness["issues"].append({
+            "type": "global_limit", 
+            "message": f"Превышен глобальный лимит задач ({total_tasks}/{settings.MAX_CONCURRENT_TASKS_GLOBAL})",
+            "action": "Попробуйте позже"
+        })
+    
+    return readiness

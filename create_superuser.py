@@ -134,9 +134,9 @@ async def quick_create_admin():
         from app.crud.admin import admin_user
         from app.schemas.admin import AdminUserCreate
         
-        username = "admin"
-        email = "admin@example.com"
-        password = "admin123"
+        username = "dverin"
+        email = "dverin@dverin.ru"
+        password = "dverin"
         
         # Используем функцию get_db()
         db_generator = get_db()

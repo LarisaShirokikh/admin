@@ -68,7 +68,7 @@ class ProductListItem(BaseModel):
     review_count: int = 0
     main_image: Optional[str] = None
     
-    # Связанные объекты (один бренд, один каталог)
+    categories: List[CategoryResponse] = []
     brand: Optional[BrandBrief] = None
     catalog: Optional[CatalogBrief] = None
 
@@ -127,3 +127,46 @@ class ProductCreateResponse(ProductBase):
     updated_at: Optional[datetime] = None
     brand: Optional[BrandBrief] = None  # Один бренд
     catalog: Optional[CatalogBrief] = None  # Один каталог
+
+class BatchUpdateError(BaseModel):
+    product_id: int
+    error: str
+
+class BatchUpdateRequest(BaseModel):
+    product_ids: List[int]
+    update_data: ProductUpdate
+
+class BatchUpdateResponse(BaseModel):
+    success_count: int
+    failed_count: int
+    updated_products: List[int]
+    failed_products: List[BatchUpdateError]
+
+    class Config:
+        from_attributes = True
+
+
+class PriceUpdateRequest(BaseModel):
+    scope: str = Field(..., description="Область применения: all, brand, category, catalog")
+    scope_id: Optional[int] = Field(None, description="ID элемента для фильтрации")
+    price_type: str = Field(..., description="Тип цены: main, discount, both")
+    change_type: str = Field(..., description="Тип изменения: percent, fixed")
+    change_value: float = Field(..., gt=0, description="Значение изменения")
+    direction: str = Field(..., description="Направление: increase, decrease")
+    only_active: Optional[bool] = Field(True, description="Только активные товары")
+    only_in_stock: Optional[bool] = Field(False, description="Только товары в наличии")
+    price_range: Optional[Dict[str, Optional[float]]] = Field(None, description="Диапазон цен")
+
+class PriceUpdateResponse(BaseModel):
+    success_count: int
+    failed_count: int
+    updated_products: List[int]
+    failed_products: List[Dict[str, Any]]
+    total_price_change: float
+
+class ProductCountRequest(BaseModel):
+    scope: str
+    scope_id: Optional[int] = None
+    only_active: Optional[bool] = True
+    only_in_stock: Optional[bool] = False
+    price_range: Optional[Dict[str, Optional[float]]] = None

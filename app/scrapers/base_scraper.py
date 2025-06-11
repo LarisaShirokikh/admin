@@ -345,7 +345,50 @@ class BaseScraper:
         self.logger.info("Счетчики товаров в категориях обновлены")
 
     # ---------- Динамические методы работы с категориями ----------
-    
+    def _prepare_product_text_for_analysis(self, product_in: ProductCreate) -> str:
+        """
+        УНИВЕРСАЛЬНАЯ ВЕРСИЯ: Подготавливает текст продукта для анализа категорий
+        Работает для всех скраперов
+        """
+        text_parts = []
+        
+        # Название продукта (самый важный текст)
+        if hasattr(product_in, 'name') and product_in.name:
+            text_parts.append(product_in.name)
+        
+        # Описание
+        if hasattr(product_in, 'description') and product_in.description:
+            text_parts.append(product_in.description)
+        
+        # Характеристики (если они есть как отдельное поле)
+        if hasattr(product_in, 'characteristics') and product_in.characteristics:
+            if isinstance(product_in.characteristics, dict):
+                for key, value in product_in.characteristics.items():
+                    if key and value:  # Проверяем, что не пустые
+                        text_parts.append(f"{key} {value}")
+            elif isinstance(product_in.characteristics, str):
+                text_parts.append(product_in.characteristics)
+        
+        # Мета-информация
+        if hasattr(product_in, 'meta_title') and product_in.meta_title:
+            text_parts.append(product_in.meta_title)
+        
+        if hasattr(product_in, 'meta_description') and product_in.meta_description:
+            text_parts.append(product_in.meta_description)
+        
+        # Артикул (если есть)
+        if hasattr(product_in, 'article') and product_in.article:
+            text_parts.append(product_in.article)
+        
+        # Объединяем все части
+        result = " ".join(text_parts)
+        
+        # Отладочное логирование
+        if hasattr(self, 'logger'):
+            self.logger.debug(f"Подготовлен текст для анализа ({len(result)} символов): {result[:100]}...")
+        
+        return result
+
     async def get_all_categories_from_db(self, db: AsyncSession) -> Dict[str, Dict]:
         """
         УЛУЧШЕНО: Получает все активные категории из базы данных с кэшированием

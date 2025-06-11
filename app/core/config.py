@@ -1,18 +1,21 @@
-from typing import List
+from collections import defaultdict
+from typing import List, Dict
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# Глобальный счетчик активных задач скрапинга - выносим за пределы класса
+active_scraping_tasks: Dict[str, int] = defaultdict(int)
 
 class Settings(BaseSettings):
     database_url: str
     redis_url: str
-
-
     SECRET_KEY: str = Field(..., env="SECRET_KEY") 
     
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
-
-
+    # Константы для лимитов
+    MAX_CONCURRENT_TASKS_PER_USER: int = 2
+    MAX_CONCURRENT_TASKS_GLOBAL: int = 5
 
     # === OAuth Yandex настройки ===
     YANDEX_CLIENT_ID: str = Field(..., env="YANDEX_CLIENT_ID")

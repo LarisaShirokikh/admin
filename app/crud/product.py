@@ -1,9 +1,10 @@
+from decimal import Decimal
 import json
 import logging
 import re
 from typing import Optional, List, Dict, Any, Tuple
 
-from sqlalchemy import func, inspect, or_, select, delete, update
+from sqlalchemy import and_, func, inspect, or_, select, delete, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.models import Product, ProductImage
 from app.models.catalog import Catalog
@@ -890,36 +891,219 @@ async def get_product_by_slug(db: AsyncSession, slug: str) -> Optional[Product]:
 
 async def get_products_count(
     db: AsyncSession,
+    search: Optional[str] = None,
     brand_id: Optional[int] = None,
     catalog_id: Optional[int] = None,
-    is_active: Optional[bool] = True
+    category_id: Optional[int] = None,
+    is_active: Optional[bool] = None,
+    in_stock: Optional[bool] = None,
+    price_from: Optional[float] = None,
+    price_to: Optional[float] = None,
+    has_brand: Optional[bool] = None,
+    has_catalog: Optional[bool] = None
 ) -> int:
     """
-    Получить количество продуктов с фильтрацией.
-    
-    Returns:
-        int: Количество продуктов
+    Получить количество продуктов с фильтрацией (включая поиск)
     """
-    try:
-        query = select(func.count(Product.id))
+    
+    query = select(func.count(Product.id))
+    conditions = []
+    
+    # Поиск (тот же код, что и выше)
+    if search and search.strip():
+        search_term = search.strip()
+        search_conditions = []
         
-        filters = []
-        if is_active is not None:
-            filters.append(Product.is_active == is_active)
-        if brand_id:
-            filters.append(Product.brand_id == brand_id)
-        if catalog_id:
-            filters.append(Product.catalog_id == catalog_id)
+        search_conditions.extend([
+            Product.name.ilike(f"%{search_term}%"),
+            Product.description.ilike(f"%{search_term}%"),
+            Product.brand.has(Brand.name.ilike(f"%{search_term}%")),
+            Product.catalog.has(Catalog.name.ilike(f"%{search_term}%")),
+            Product.categories.any(Category.name.ilike(f"%{search_term}%"))
+        ])
         
-        if filters:
-            query = query.where(*filters)
+        try:
+            search_number = float(search_term)
+            search_conditions.extend([
+                Product.price == search_number,
+                Product.discount_price == search_number
+            ])
+        except ValueError:
+            pass
         
-        result = await db.execute(query)
-        return result.scalar()
+        conditions.append(or_(*search_conditions))
+    
+    # Остальные фильтры
+    if brand_id is not None:
+        conditions.append(Product.brand_id == brand_id)
+    if catalog_id is not None:
+        conditions.append(Product.catalog_id == catalog_id)
+    if category_id is not None:
+        conditions.append(Product.categories.any(Category.id == category_id))
+    if is_active is not None:
+        conditions.append(Product.is_active == is_active)
+    if in_stock is not None:
+        # ИСПРАВЛЕНИЕ: Используем in_stock вместо stock_quantity
+        conditions.append(Product.in_stock == in_stock)
+    if price_from is not None:
+        conditions.append(Product.price >= price_from)
+    if price_to is not None:
+        conditions.append(Product.price <= price_to)
+    if has_brand is not None:
+        if has_brand:
+            conditions.append(Product.brand_id.isnot(None))
+        else:
+            conditions.append(Product.brand_id.is_(None))
+    if has_catalog is not None:
+        if has_catalog:
+            conditions.append(Product.catalog_id.isnot(None))
+        else:
+            conditions.append(Product.catalog_id.is_(None))
+    
+    if conditions:
+        query = query.where(and_(*conditions))
+    
+    result = await db.execute(query)
+    return result.scalar() or 0
+
+async def get_products_paginated_with_relations(
+    db: AsyncSession,
+    skip: int = 0,
+    limit: int = 20,
+    search: Optional[str] = None,
+    brand_id: Optional[int] = None,
+    catalog_id: Optional[int] = None,
+    category_id: Optional[int] = None,
+    price_from: Optional[float] = None,
+    price_to: Optional[float] = None,
+    in_stock: Optional[bool] = None,
+    is_active: Optional[bool] = True,
+    sort_by: str = "created_at",
+    sort_order: str = "desc"
+):
+    """
+    Получить продукты с пагинацией, фильтрацией и полными объектами связей
+    """
+    
+    # Базовый запрос с загрузкой связей
+    query = select(Product).options(
+        selectinload(Product.brand),
+        selectinload(Product.catalog),
+        selectinload(Product.categories),
+        selectinload(Product.product_images)
+    )
+    
+    # Список условий для фильтрации
+    conditions = []
+    
+    # Улучшенный поиск по множественным полям
+    if search and search.strip():
+        search_term = search.strip()
         
-    except Exception as e:
-        logger.error(f"Ошибка при подсчете продуктов: {e}", exc_info=True)
-        raise
+        # Создаем условия для поиска
+        search_conditions = []
+        
+        # Поиск по названию (основной)
+        search_conditions.append(
+            Product.name.ilike(f"%{search_term}%")
+        )
+        
+        # Поиск по описанию
+        search_conditions.append(
+            Product.description.ilike(f"%{search_term}%")
+        )
+        
+        
+        # Поиск по контенту (если есть)
+        # if hasattr(Product, 'content'):
+        #     search_conditions.append(
+        #         Product.content.ilike(f"%{search_term}%")
+        #     )
+        
+        # Поиск по тегам (если есть)
+        if hasattr(Product, 'tags'):
+            search_conditions.append(
+                func.array_to_string(Product.tags, ' ').ilike(f"%{search_term}%")
+            )
+        
+        # Поиск по бренду (join)
+        search_conditions.append(
+            Product.brand.has(Brand.name.ilike(f"%{search_term}%"))
+        )
+        
+        # Поиск по каталогу (join)
+        search_conditions.append(
+            Product.catalog.has(Catalog.name.ilike(f"%{search_term}%"))
+        )
+        
+        # Поиск по категориям (many-to-many)
+        search_conditions.append(
+            Product.categories.any(Category.name.ilike(f"%{search_term}%"))
+        )
+        
+        # Попытка найти числовое значение для поиска по цене
+        try:
+            search_number = float(search_term)
+            search_conditions.append(Product.price == search_number)
+            search_conditions.append(Product.sale_price == search_number)
+        except ValueError:
+            pass
+        
+        # Объединяем все условия поиска через OR
+        conditions.append(or_(*search_conditions))
+    
+    # Фильтр по бренду
+    if brand_id is not None:
+        conditions.append(Product.brand_id == brand_id)
+    
+    # Фильтр по каталогу
+    if catalog_id is not None:
+        conditions.append(Product.catalog_id == catalog_id)
+    
+    # Фильтр по категории
+    if category_id is not None:
+        conditions.append(Product.categories.any(Category.id == category_id))
+    
+    # Фильтр по цене
+    if price_from is not None:
+        conditions.append(Product.price >= price_from)
+    if price_to is not None:
+        conditions.append(Product.price <= price_to)
+    
+    # Фильтр по наличию - ИСПРАВЛЕНИЕ
+    if in_stock is not None:
+        conditions.append(Product.in_stock == in_stock)
+    
+    # Фильтр по активности
+    if is_active is not None:
+        conditions.append(Product.is_active == is_active)
+    
+    # Применяем все условия
+    if conditions:
+        query = query.where(and_(*conditions))
+    
+    # Сортировка
+    sort_column = getattr(Product, sort_by, Product.created_at)
+    if sort_order.lower() == 'desc':
+        query = query.order_by(sort_column.desc())
+    else:
+        query = query.order_by(sort_column.asc())
+    
+    # Запрос для подсчета общего количества
+    count_query = select(func.count(Product.id))
+    if conditions:
+        count_query = count_query.where(and_(*conditions))
+    
+    # Выполняем запросы
+    total_count_result = await db.execute(count_query)
+    total_count = total_count_result.scalar()
+    
+    # Применяем пагинацию и выполняем основной запрос
+    query = query.offset(skip).limit(limit)
+    result = await db.execute(query)
+    products = result.scalars().all()
+    
+    return products, total_count
 
 async def toggle_product_status(db: AsyncSession, product_id: int) -> Optional[Product]:
     """
@@ -997,112 +1181,6 @@ async def get_product_by_slug_with_relations(db: AsyncSession, slug: str) -> Opt
         
     except Exception as e:
         logger.error(f"Ошибка при получении продукта по slug {slug} с связями: {e}", exc_info=True)
-        raise
-
-async def get_products_paginated_with_relations(
-    db: AsyncSession,
-    skip: int = 0,
-    limit: int = 100,
-    search: Optional[str] = None,
-    brand_id: Optional[int] = None,
-    catalog_id: Optional[int] = None,
-    category_id: Optional[int] = None,
-    price_from: Optional[float] = None,
-    price_to: Optional[float] = None,
-    in_stock: Optional[bool] = None,
-    is_active: Optional[bool] = True,
-    sort_by: Optional[str] = "created_at",
-    sort_order: Optional[str] = "desc"
-) -> Tuple[List[Product], int]:
-    """
-    Получить продукты с пагинацией и подгрузкой связанных объектов.
-    """
-    try:
-        # Базовый запрос с подгрузкой связанных объектов
-        query = select(Product).options(
-            selectinload(Product.brand),
-            selectinload(Product.catalog),
-            selectinload(Product.categories),
-            selectinload(Product.product_images)
-        )
-        
-        # Применяем фильтры
-        filters = []
-        
-        if is_active is not None:
-            filters.append(Product.is_active == is_active)
-        
-        if brand_id:
-            filters.append(Product.brand_id == brand_id)
-            
-        if catalog_id:
-            filters.append(Product.catalog_id == catalog_id)
-            
-        if category_id:
-            # Фильтр по категориям через many-to-many связь
-            from app.models.attributes import product_categories
-            query = query.join(product_categories).filter(product_categories.c.category_id == category_id)
-            
-        if price_from is not None:
-            filters.append(Product.price >= price_from)
-            
-        if price_to is not None:
-            filters.append(Product.price <= price_to)
-            
-        if in_stock is not None:
-            filters.append(Product.in_stock == in_stock)
-        
-        if search:
-            search_filter = f"%{search}%"
-            filters.append(
-                or_(
-                    Product.name.ilike(search_filter),
-                    Product.description.ilike(search_filter)
-                )
-            )
-        
-        if filters:
-            query = query.where(*filters)
-        
-        # Сортировка
-        if sort_by == "price":
-            order_field = Product.price
-        elif sort_by == "name":
-            order_field = Product.name
-        elif sort_by == "rating":
-            order_field = Product.rating
-        elif sort_by == "created_at":
-            order_field = Product.created_at
-        else:
-            order_field = Product.id
-        
-        if sort_order == "desc":
-            query = query.order_by(order_field.desc())
-        else:
-            query = query.order_by(order_field.asc())
-        
-        # Подсчет общего количества (без подгрузки связей для производительности)
-        count_query = select(func.count(Product.id))
-        if category_id:
-            from app.models.attributes import product_categories
-            count_query = count_query.select_from(Product).join(product_categories).filter(product_categories.c.category_id == category_id)
-        if filters:
-            count_query = count_query.where(*filters)
-        
-        total_result = await db.execute(count_query)
-        total_count = total_result.scalar()
-        
-        # Пагинация
-        query = query.offset(skip).limit(limit)
-        
-        # Выполнение запроса
-        result = await db.execute(query)
-        products = list(result.scalars().all())
-        
-        return products, total_count
-        
-    except Exception as e:
-        logger.error(f"Ошибка при получении продуктов с связями: {e}", exc_info=True)
         raise
 
 async def update_product_with_relations(db: AsyncSession, product_id: int, product_update: "ProductUpdate") -> Optional[Product]:
@@ -1207,3 +1285,49 @@ async def get_all_products_with_relations(db: AsyncSession) -> List[Product]:
     except Exception as e:
         logger.error(f"Ошибка при получении всех продуктов с связями: {e}", exc_info=True)
         raise
+
+def calculate_new_prices(product, change_type: str, change_value: float, direction: str, price_type: str) -> dict:
+    """
+    Вычисляет новые цены для товара
+    """
+    new_prices = {}
+    
+    def calculate_price(current_price: float) -> float:
+        if change_type == "percent":
+            multiplier = (100 + change_value) / 100 if direction == "increase" else (100 - change_value) / 100
+            return current_price * multiplier
+        else:  # fixed
+            return current_price + change_value if direction == "increase" else current_price - change_value
+    
+    if price_type in ['main', 'both'] and product.price:
+        new_prices['main'] = Decimal(str(calculate_price(float(product.price)))).quantize(Decimal('0.01'))
+    
+    if price_type in ['discount', 'both'] and product.discount_price:
+        new_prices['discount'] = Decimal(str(calculate_price(float(product.discount_price)))).quantize(Decimal('0.01'))
+    
+    return new_prices
+
+def validate_prices(prices: dict) -> bool:
+    """
+    Валидация новых цен
+    """
+    for price_type, price in prices.items():
+        if price is not None:
+            if price <= 0:
+                return False
+            if price > 999999:  # Максимальная цена
+                return False
+    
+    # Проверяем, что цена со скидкой не больше основной
+    if prices.get('main') and prices.get('sale'):
+        if prices['discount'] >= prices['main']:
+            return False
+    
+    return True
+
+def log_bulk_price_update(user_id: int, request_data: dict, success_count: int, failed_count: int):
+    """
+    Логирование операции массового изменения цен
+    """
+    # Здесь можно добавить логирование в БД или файл
+    pass

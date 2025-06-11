@@ -1,6 +1,6 @@
 import os
 import time
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from starlette.middleware.sessions import SessionMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
@@ -10,7 +10,7 @@ from app.api.v1.catalogs import router as catalogs_router
 from app.api.v1.import_logs import router as import_logs_router
 from app.api.v1.scraper import router as scraper_router
 from app.api.v1.video import router as video_router
-from app.api.v1.brand import router as brand_router
+from app.api.v1.brands import router as brand_router
 from app.api.v1.admin.auth import router as admin_auth_router
 from app.core.config import Settings
 
@@ -76,8 +76,8 @@ app.include_router(catalogs_router, prefix="/api/v1/catalogs", tags=["Catalogs"]
 app.include_router(import_logs_router, prefix="/api/v1/import-logs", tags=["Import Logs"])
 app.include_router(scraper_router, prefix="/api/v1/scraper", tags=["Scrapers"])
 app.include_router(video_router, prefix="/api/v1/video", tags=["Video"])
-app.include_router(brand_router, prefix="/api/v1/brand", tags=["Brand"])
-app.include_router(admin_auth_router, prefix="/api/v1/admin-api/auth", tags=["Admin-auth"])
+app.include_router(brand_router, prefix="/api/v1/brands", tags=["Brand"])
+app.include_router(admin_auth_router, prefix="/api/v1/admin/auth", tags=["Auth"])
 
 
 os.makedirs("media", exist_ok=True)
@@ -87,3 +87,60 @@ app.mount("/media", StaticFiles(directory="media"), name="media")
 def root():
     return {"message": "It works admin-api!"}
 
+@app.get("/debug/media")
+async def debug_media_files():
+    """Диагностика медиа файлов"""
+    
+    # Проверяем рабочую директорию
+    current_dir = os.getcwd()
+    
+    # Проверяем существование папок
+    media_exists = os.path.exists("media")
+    videos_exists = os.path.exists("media/videos")
+    
+    # Список файлов
+    files_in_media = []
+    files_in_videos = []
+    
+    if media_exists:
+        files_in_media = os.listdir("media")
+    
+    if videos_exists:
+        files_in_videos = os.listdir("media/videos")
+    
+    # Проверяем конкретный файл
+    target_file = "media/videos/92a7ab1a-cea5-4f7b-8fe0-ce010a4e2495_IMG_6995.mp4"
+    target_file_exists = os.path.exists(target_file)
+    
+    # Получаем абсолютные пути
+    abs_media_path = os.path.abspath("media")
+    abs_target_path = os.path.abspath(target_file)
+    
+    return {
+        "current_directory": current_dir,
+        "media_exists": media_exists,
+        "videos_exists": videos_exists,
+        "files_in_media": files_in_media,
+        "files_in_videos": files_in_videos,
+        "target_file_exists": target_file_exists,
+        "absolute_media_path": abs_media_path,
+        "absolute_target_path": abs_target_path,
+        "target_file_path": target_file
+    }
+
+@app.get("/debug/file/{filename}")
+async def debug_specific_file(filename: str):
+    """Проверка конкретного файла"""
+    file_path = f"media/videos/{filename}"
+    
+    if not os.path.exists(file_path):
+        raise HTTPException(status_code=404, detail=f"File not found: {file_path}")
+    
+    file_stats = os.stat(file_path)
+    
+    return {
+        "file_path": file_path,
+        "absolute_path": os.path.abspath(file_path),
+        "file_size": file_stats.st_size,
+        "exists": True
+    }

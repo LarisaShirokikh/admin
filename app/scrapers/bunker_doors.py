@@ -813,7 +813,8 @@ class BunkerDoorsScraper(BaseScraper):
     # ВАЖНО: Метод parse_multiple_catalogs должен быть на ПРАВИЛЬНОМ уровне отступов!
     async def parse_multiple_catalogs(self, catalog_urls: List[str], db: AsyncSession) -> int:
         """
-        Парсит несколько каталогов (ПЕРЕОПРЕДЕЛЕН метод из BaseScraper)
+        Парсит несколько каталогов и создает или обновляет продукты в базе данных
+        с автоматической категоризацией (УНИФИЦИРОВАННАЯ ЛОГИКА как в Лабиринте)
         """
         self.logger.info(f"Запуск парсера для {len(catalog_urls)} каталогов")
         total_products = 0
@@ -822,13 +823,12 @@ class BunkerDoorsScraper(BaseScraper):
         
         # Получаем бренд
         brand_id = await self.ensure_brand_exists(db)
+        self.logger.info(f"Получен ID бренда Bunker: {brand_id}")
         
         # Обновляем существующие каталоги
         await self.update_catalogs_brand_id(db, brand_id)
         
-        # ШАГИ ПОДГОТОВКИ КАТЕГОРИЙ
-        
-        # 1. Получаем ВСЕ категории из БД
+        # 1. Получаем все активные категории (как в Лабиринте)
         all_categories = await self.get_all_categories_from_db(db)
         
         if not all_categories:
@@ -837,7 +837,7 @@ class BunkerDoorsScraper(BaseScraper):
         
         self.logger.info(f"Найдено {len(all_categories)} активных категорий в БД")
         
-        # 2. Получаем обязательную категорию "Все двери"
+        # 2. Получаем обязательную категорию "Все двери" (как в Лабиринте)
         default_category = await self.get_default_category(db)
         
         if not default_category:
@@ -848,7 +848,7 @@ class BunkerDoorsScraper(BaseScraper):
         self.logger.info(f"Основная категория: '{default_category.name}' (ID: {default_category_id})")
         self.logger.info(f"Бренд для всех продуктов: '{self.brand_name}' (ID: {brand_id})")
         
-        # ПАРСИНГ И СОЗДАНИЕ ПРОДУКТОВ
+        # Собираем продукты для последующей классификации
         products_to_classify = []
         
         for url in catalog_urls:
@@ -858,7 +858,7 @@ class BunkerDoorsScraper(BaseScraper):
                 
                 for product_in in products:
                     try:
-                        # Проверка на существование
+                        # Проверка на существование продукта
                         result = await db.execute(
                             select(Product).where(
                                 or_(
@@ -869,11 +869,11 @@ class BunkerDoorsScraper(BaseScraper):
                         )
                         existing_product = result.scalar_one_or_none()
                         
-                        # Создаем/обновляем продукт
+                        # Создаем или обновляем продукт
                         created_product = await create_or_update_product(db, product_in)
                         
                         if created_product:
-                            # Собираем ВЕСЬ текст для анализа категорий
+                            # Собираем ВЕСЬ текст для анализа категорий (как в Лабиринте)
                             analysis_text = self._prepare_product_text_for_analysis(product_in)
                             
                             # Добавляем в очередь для классификации
@@ -891,7 +891,9 @@ class BunkerDoorsScraper(BaseScraper):
                                 new_products += 1
                                 
                             await db.flush()
-                        
+                        else:
+                            self.logger.warning(f"Не удалось создать/обновить продукт {product_in.name}")
+                    
                     except Exception as e:
                         self.logger.warning(f"Ошибка при обработке товара: {e}")
                         await db.rollback()
@@ -909,7 +911,7 @@ class BunkerDoorsScraper(BaseScraper):
             await db.rollback()
             return 0
         
-        # КЛАССИФИКАЦИЯ ПО КАТЕГОРИЯМ
+        # КЛАССИФИКАЦИЯ ПО КАТЕГОРИЯМ (как в Лабиринте)
         if products_to_classify:
             self.logger.info(f"Начинаем классификацию {len(products_to_classify)} продуктов")
             
@@ -928,8 +930,8 @@ class BunkerDoorsScraper(BaseScraper):
                         min_matches=1  # Минимум 1 совпадение
                     )
                     
-                    # Назначаем продукт в категории (обязательно в "Все двери" + дополнительные)
-                    await self.assign_product_to_all_categories(
+                    # ИСПРАВЛЕНО: Используем базовый метод assign_product_to_all_categories
+                    await super().assign_product_to_all_categories(
                         db,
                         product_id,
                         default_category_id,
@@ -1040,32 +1042,4 @@ class BunkerDoorsScraper(BaseScraper):
             self.logger.error(f"Ошибка при назначении категорий продукту {product_id}: {e}", exc_info=True)
             raise
 
-    def _prepare_product_text_for_analysis(self, product_in: ProductCreate) -> str:
-        """
-        УПРОЩЕНО: Подготовка текста продукта для анализа категорий
-        (характеристики теперь в описании)
-        """
-        text_parts = []
-        
-        # Название продукта (самый важный текст)
-        if hasattr(product_in, 'name') and product_in.name:
-            text_parts.append(product_in.name)
-        
-        # Описание (теперь уже содержит характеристики)
-        if hasattr(product_in, 'description') and product_in.description:
-            text_parts.append(product_in.description)
-        
-        # Мета-информация
-        if hasattr(product_in, 'meta_title') and product_in.meta_title:
-            text_parts.append(product_in.meta_title)
-        
-        if hasattr(product_in, 'meta_description') and product_in.meta_description:
-            text_parts.append(product_in.meta_description)
-        
-        # Артикул (если есть)
-        if hasattr(product_in, 'article') and product_in.article:
-            text_parts.append(product_in.article)
-        
-        result = " ".join(text_parts)
-        self.logger.debug(f"Подготовлен текст для анализа ({len(result)} символов): {result[:100]}...")
-        return result
+    

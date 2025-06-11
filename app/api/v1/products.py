@@ -1,11 +1,21 @@
 # app/api/v1/products.py (защищенная версия)
+from datetime import datetime
 import shutil
 import tempfile
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 from typing import List, Optional
+from sqlalchemy import and_, select
+from sqlalchemy.orm import selectinload
 
+from app.models.category import Category
+from app.models.product import Product
 from app.schemas.product import (
+    BatchUpdateRequest,
+    BatchUpdateResponse,
+    PriceUpdateRequest,
+    PriceUpdateResponse,
+    ProductCountRequest,
     ProductDetail, 
     ProductCreate, 
     ProductUpdate,
@@ -14,8 +24,10 @@ from app.schemas.product import (
     ProductResponse,
 )
 from app.crud.product import (
+    calculate_new_prices,
     get_product_by_title,
     delete_product,
+    log_bulk_price_update,
     soft_delete_product,
     get_products_count,
     toggle_product_status,
@@ -26,7 +38,8 @@ from app.crud.product import (
     get_products_paginated_with_relations,
     get_all_products_filtered_with_relations,
     update_product_with_relations,
-    create_product_with_relations
+    create_product_with_relations,
+    validate_prices
 )
 from app.deps import get_db  # Исправлен импорт
 from app.worker.tasks import import_csv_task
@@ -41,7 +54,7 @@ router = APIRouter()
 
 @router.get("/", response_model=List[ProductListItem])
 async def list_products(
-    request: Request,  # Добавляем Request
+    request: Request,
     skip: int = Query(0, ge=0, description="Количество продуктов для пропуска"),
     limit: int = Query(20, ge=1, le=100, description="Количество продуктов для возврата"),
     search: Optional[str] = Query(None, description="Поиск по названию и описанию"),
@@ -87,6 +100,23 @@ async def list_products(
             product.main_image = main_img.url if main_img else product.product_images[0].url
         else:
             product.main_image = None
+
+        if not hasattr(product, 'categories'):
+            # Загружаем категории для продукта
+            from sqlalchemy.orm import selectinload
+            from app.models.product import Product
+            
+            result = await db.execute(
+                select(Product)
+                .options(selectinload(Product.categories))
+                .where(Product.id == product.id)
+            )
+            product_with_categories = result.scalar_one_or_none()
+            
+            if product_with_categories:
+                product.categories = product_with_categories.categories
+            else:
+                product.categories = []
     
     return products
 
@@ -108,18 +138,23 @@ async def get_products_stats(
     
     # Дополнительная статистика по брендам и каталогам
     with_brand = await get_products_count(db, has_brand=True)
+    without_brand = await get_products_count(db, has_brand=False)
     with_catalog = await get_products_count(db, has_catalog=True)
+    without_catalog = await get_products_count(db, has_catalog=False)
     in_stock = await get_products_count(db, in_stock=True)
+    out_of_stock = await get_products_count(db, in_stock=False)
     
     stats = {
         "total_products": total_products,
         "active_products": active_products,
         "inactive_products": inactive_products,
         "products_with_brand": with_brand,
+        "products_without_brand": without_brand,
         "products_with_catalog": with_catalog,
+        "products_without_catalog": without_catalog,
         "products_in_stock": in_stock,
-        "products_out_of_stock": total_products - in_stock,
-        "last_updated": "2025-06-07T09:00:00Z",
+        "products_out_of_stock": out_of_stock,
+        "last_updated": "2025-06-08T00:00:00Z",
         "requested_by": current_user.username,
         "user_role": "superuser" if current_user.is_superuser else "admin"
     }
@@ -129,23 +164,33 @@ async def get_products_stats(
 
 @router.get("/count")
 async def get_products_count_endpoint(
-    request: Request,  # Добавляем Request
+    request: Request,
+    search: Optional[str] = Query(None, description="Поиск по названию и описанию"),  # Добавлено
     brand_id: Optional[int] = Query(None, description="Фильтр по ID бренда"),
     catalog_id: Optional[int] = Query(None, description="Фильтр по ID каталога"),
+    category_id: Optional[int] = Query(None, description="Фильтр по ID категории"),  # Добавлено
     is_active: Optional[bool] = Query(True, description="Только активные товары"),
-    current_user: AdminUser = Depends(get_current_active_admin),  # ЗАЩИТА
+    in_stock: Optional[bool] = Query(None, description="Фильтр по наличию"),  # Добавлено
+    price_from: Optional[float] = Query(None, ge=0, description="Минимальная цена"),  # Добавлено
+    price_to: Optional[float] = Query(None, ge=0, description="Максимальная цена"),  # Добавлено
+    current_user: AdminUser = Depends(get_current_active_admin),
     db: AsyncSession = Depends(get_db)
 ):
     """
-    Получить количество продуктов с фильтрацией
+    Получить количество продуктов с фильтрацией (включая поиск)
     """
-    check_admin_rate_limit(request)  # Rate limiting
+    check_admin_rate_limit(request)
     
     count = await get_products_count(
         db=db,
+        search=search,  # Добавлено
         brand_id=brand_id,
         catalog_id=catalog_id,
-        is_active=is_active
+        category_id=category_id,  # Добавлено
+        is_active=is_active,
+        in_stock=in_stock,  # Добавлено
+        price_from=price_from,  # Добавлено
+        price_to=price_to,  # Добавлено
     )
     return {"count": count}
 
@@ -484,6 +529,92 @@ async def update_product_full(
             detail=f"Ошибка при обновлении продукта: {str(e)}"
         )
 
+@router.patch("/batch", response_model=BatchUpdateResponse)
+async def batch_update_products(
+    request: Request,
+    batch_data: BatchUpdateRequest,
+    current_user: AdminUser = Depends(get_current_active_admin),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Массовое обновление продуктов - более эффективно чем отдельные запросы
+    """
+    print(f"🔄 BATCH UPDATE: User {current_user.username}, Products: {len(batch_data.product_ids)}")
+    check_admin_rate_limit(request, max_requests=100, window_minutes=1)  # Строже лимит, но один запрос
+    
+    if len(batch_data.product_ids) > 100:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Максимум 100 продуктов за раз"
+        )
+    
+    print(f"Admin {current_user.username} batch updating {len(batch_data.product_ids)} products")
+    
+    success_count = 0
+    failed_count = 0
+    updated_products = []
+    failed_products = []
+    
+    # Получаем данные для обновления только заполненные поля
+    update_data = batch_data.update_data.model_dump(exclude_unset=True)
+    if not update_data:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Не указаны поля для обновления"
+        )
+    
+    try:
+        for product_id in batch_data.product_ids:
+            try:
+                # Проверяем существование продукта
+                existing_product = await get_product_by_id_with_relations(db, product_id)
+                if not existing_product:
+                    failed_products.append({
+                        "product_id": product_id,
+                        "error": f"Продукт с ID {product_id} не найден"
+                    })
+                    failed_count += 1
+                    continue
+                
+                # Обновляем продукт
+                updated_product = await update_product_with_relations(db, product_id, batch_data.update_data)
+                if updated_product:
+                    updated_products.append(product_id)
+                    success_count += 1
+                else:
+                    failed_products.append({
+                        "product_id": product_id,
+                        "error": "Не удалось обновить продукт"
+                    })
+                    failed_count += 1
+                    
+            except Exception as e:
+                failed_products.append({
+                    "product_id": product_id,
+                    "error": str(e)
+                })
+                failed_count += 1
+        
+        # Коммитим все изменения сразу
+        await db.commit()
+        
+        print(f"Batch update completed: {success_count} success, {failed_count} failed")
+        
+        return BatchUpdateResponse(
+            success_count=success_count,
+            failed_count=failed_count,
+            updated_products=updated_products,
+            failed_products=failed_products
+        )
+        
+    except Exception as e:
+        await db.rollback()
+        print(f"ERROR: Batch update failed for {current_user.username}: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Ошибка при массовом обновлении: {str(e)}"
+        )
+    
 @router.patch("/{product_id}", response_model=ProductDetail)
 async def update_product_partial(
     request: Request,  # Добавляем Request
@@ -495,7 +626,7 @@ async def update_product_partial(
     """
     Частичное обновление продукта с возвратом полного объекта со связями
     """
-    check_admin_rate_limit(request, max_requests=30, window_minutes=1)  # Rate limiting
+    check_admin_rate_limit(request, max_requests=200, window_minutes=1)  # Rate limiting
     
     try:
         # Проверяем существование продукта
@@ -547,6 +678,173 @@ async def update_product_partial(
             detail=f"Ошибка при частичном обновлении продукта: {str(e)}"
         )
 
+@router.post("/bulk-update-prices", response_model=PriceUpdateResponse)
+async def bulk_update_prices(
+    request: PriceUpdateRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: AdminUser = Depends(get_current_active_admin),
+):
+    """
+    Массовое изменение цен товаров
+    """
+    try:
+        # Проверяем права доступа
+        if not current_user.is_superuser and not current_user.has_permission("edit_products"):
+            raise HTTPException(status_code=403, detail="Недостаточно прав")
+
+        # Строим базовый запрос
+        query = select(Product).options(selectinload(Product.categories))
+        conditions = []
+        
+        # Применяем фильтры по области
+        if request.scope == "brand" and request.scope_id:
+            query = query.filter(Product.brand_id == request.scope_id)
+        elif request.scope == "category" and request.scope_id:
+            query = query.join(Product.categories).filter(Category.id == request.scope_id)
+        elif request.scope == "catalog" and request.scope_id:
+            query = query.filter(Product.catalog_id == request.scope_id)
+        
+        # Дополнительные фильтры
+        if request.only_active:
+            query = query.filter(Product.is_active == True)
+        
+        if request.only_in_stock:
+            query = query.filter(Product.in_stock == True)
+            
+        # Фильтр по диапазону цен
+        if request.price_range:
+            if request.price_range.get("from"):
+                query = query.filter(Product.price >= request.price_range["from"])
+            if request.price_range.get("to"):
+                query = query.filter(Product.price <= request.price_range["to"])
+        
+        if conditions:
+            query = query.where(and_(*conditions))
+
+        # Получаем товары для обновления
+        result = await db.execute(query)
+        products = result.scalars().all()
+        
+        updated_products = []
+        failed_products = []
+        total_price_change = 0.0
+        
+        for product in products:
+            try:
+                old_prices = {
+                    'main': float(product.price) if product.price else 0,
+                    'discount': float(product.discount_price) if product.discount_price else 0 
+                }
+                
+                # Вычисляем новые цены
+                new_prices = calculate_new_prices(
+                    product, 
+                    request.change_type, 
+                    request.change_value, 
+                    request.direction,
+                    request.price_type
+                )
+                
+                # Проверяем валидность новых цен
+                if not validate_prices(new_prices):
+                    failed_products.append({
+                        "product_id": product.id,
+                        "error": "Некорректная цена после изменения"
+                    })
+                    continue
+                
+                # Обновляем цены
+                if request.price_type in ['main', 'both'] and new_prices.get('main') is not None:
+                    old_main = product.price
+                    product.price = new_prices['main']
+                    if old_main:
+                        total_price_change += float(new_prices['main'] - old_main)
+                
+                if request.price_type in ['discount', 'both'] and new_prices.get('discount') is not None:  # ИСПРАВЛЕНО
+                    old_discount = product.discount_price or 0  # ИСПРАВЛЕНО
+                    product.discount_price = new_prices['discount']  # ИСПРАВЛЕНО
+                    if old_discount:
+                        total_price_change += float(new_prices['discount'] - old_discount)  # ИСПРАВЛЕНО
+                
+                # Обновляем время изменения
+                from datetime import datetime
+                product.updated_at = datetime.utcnow()
+                
+                updated_products.append(product.id)
+                
+            except Exception as e:
+                failed_products.append({
+                    "product_id": product.id,
+                    "error": str(e)
+                })
+        
+        await db.commit()
+        
+        # Логируем операцию
+        print(f"Bulk price update by {current_user.username}: {len(updated_products)} success, {len(failed_products)} failed")
+        
+        return PriceUpdateResponse(
+            success_count=len(updated_products),
+            failed_count=len(failed_products),
+            updated_products=updated_products,
+            failed_products=failed_products,
+            total_price_change=total_price_change
+        )
+        
+    except Exception as e:
+        db.rollback()
+        print(f"ERROR in bulk_update_prices: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Ошибка при обновлении цен: {str(e)}")
+
+@router.post("/count-for-price-update")
+async def get_products_count_for_price_update(
+    request: ProductCountRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: AdminUser = Depends(get_current_active_admin),
+):
+    """
+    Получение количества товаров для оценки изменений - ИСПРАВЛЕННАЯ ВЕРСИЯ
+    """
+    try:
+        # ИСПРАВЛЕНИЕ: Используем async SQLAlchemy
+        from sqlalchemy import select, and_, func
+        
+        # Строим запрос аналогично основной функции
+        query = select(func.count(Product.id))
+        conditions = []
+        
+        if request.scope == "brand" and request.scope_id:
+            conditions.append(Product.brand_id == request.scope_id)
+        elif request.scope == "category" and request.scope_id:
+            query = query.select_from(Product).join(Product.categories).where(Category.id == request.scope_id)
+        elif request.scope == "catalog" and request.scope_id:
+            conditions.append(Product.catalog_id == request.scope_id)
+        
+        if request.only_active:
+            conditions.append(Product.is_active == True)
+        
+        if request.only_in_stock:
+            conditions.append(Product.in_stock == True)
+            
+        if request.price_range:
+            if request.price_range.get("from"):
+                conditions.append(Product.price >= request.price_range["from"])
+            if request.price_range.get("to"):
+                conditions.append(Product.price <= request.price_range["to"])
+        
+        # Применяем условия
+        if conditions:
+            query = query.where(and_(*conditions))
+        
+        # ИСПРАВЛЕНИЕ: Асинхронное выполнение
+        result = await db.execute(query)
+        count = result.scalar()
+        
+        return {"count": count or 0}
+        
+    except Exception as e:
+        print(f"ERROR in get_products_count_for_price_update: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Ошибка при подсчете товаров: {str(e)}")
 # ========== DELETE эндпоинты (удаление - ТОЛЬКО ДЛЯ СУПЕРАДМИНА) ==========
 
 @router.delete("/{product_id}", status_code=status.HTTP_204_NO_CONTENT)

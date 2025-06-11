@@ -7,6 +7,8 @@ import jwt
 
 from app.deps import get_db
 from app.crud.admin import admin_user
+from app.deps.admin_auth import get_current_active_admin
+from app.models.admin import AdminUser
 from app.schemas.admin import AdminLoginRequest, AdminLoginResponse
 
 router = APIRouter()
@@ -133,6 +135,29 @@ async def refresh_token(
         "token_type": "bearer",
         "expires_in": ACCESS_TOKEN_EXPIRE_MINUTES * 60
     }
+
+
+@router.get("/me")
+async def get_current_user(
+    request: Request,
+    current_user: AdminUser = Depends(get_current_active_admin),  # Зависимость для проверки токена
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Получить информацию о текущем авторизованном пользователе
+    """
+    return {
+        "id": current_user.id,
+        "username": current_user.username,
+        "email": current_user.email,
+        "is_active": current_user.is_active,
+        "is_superuser": current_user.is_superuser,
+        "created_at": current_user.created_at.isoformat() if current_user.created_at else None,
+        "last_login": current_user.last_login.isoformat() if current_user.last_login else None,
+        "failed_login_attempts": current_user.failed_login_attempts,
+        "locked_until": current_user.locked_until.isoformat() if current_user.locked_until else None
+    }
+
 
 @router.post("/logout")
 async def admin_logout():

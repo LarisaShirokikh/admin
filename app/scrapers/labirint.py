@@ -345,26 +345,4 @@ class LabirintScraper(BaseScraper):
         self.logger.info(f"ИТОГО: {total_products} товаров (новых: {new_products}, обновлено: {updated_products})")
         return total_products
     
-    def _prepare_product_text_for_analysis(self, product_in: ProductCreate) -> str:
-        """
-        Подготавливает текст продукта для анализа категорий
-        """
-        text_parts = []
-        
-        # Название продукта (самый важный текст)
-        if product_in.name:
-            text_parts.append(product_in.name)
-        
-        # Описание
-        if product_in.description:
-            text_parts.append(product_in.description)
-        
-        
-        # Мета-информация
-        if hasattr(product_in, 'meta_title') and product_in.meta_title:
-            text_parts.append(product_in.meta_title)
-        
-        if hasattr(product_in, 'meta_description') and product_in.meta_description:
-            text_parts.append(product_in.meta_description)
-        
-        return " ".join(text_parts)
+    
