@@ -1,8 +1,8 @@
-# app/api/v1/admin/auth.py (или где у вас находится этот файл)
+# app/api/v1/admin/auth.py (исправленный)
 from fastapi import APIRouter, Depends, HTTPException, status, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 from datetime import datetime, timedelta
-import secrets
+from pydantic import BaseModel
 import jwt
 
 from app.deps import get_db
@@ -16,15 +16,23 @@ router = APIRouter()
 # Временный секрет для JWT (потом перенесем в .env)
 JWT_SECRET = "your-temp-secret-key-change-this"
 ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 5
+
+# ИСПРАВЛЕНО: Увеличиваем время жизни токенов
+ACCESS_TOKEN_EXPIRE_MINUTES = 120  # 2 часа вместо 5 минут
+REFRESH_TOKEN_EXPIRE_HOURS = 24 * 7  # 7 дней
+
+# Схема для refresh токена
+class RefreshTokenRequest(BaseModel):
+    refresh_token: str
 
 def create_access_token(user_id: int) -> tuple[str, str]:
     """Создание access и refresh токенов"""
-    # Access token с коротким сроком жизни
+    # Access token с увеличенным сроком жизни
     access_payload = {
         "sub": str(user_id),
         "type": "access",
-        "exp": datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+        "exp": datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES),
+        "iat": datetime.utcnow()  # Добавляем время создания
     }
     access_token = jwt.encode(access_payload, JWT_SECRET, algorithm=ALGORITHM)
     
@@ -32,7 +40,8 @@ def create_access_token(user_id: int) -> tuple[str, str]:
     refresh_payload = {
         "sub": str(user_id),
         "type": "refresh", 
-        "exp": datetime.utcnow() + timedelta(hours=24)
+        "exp": datetime.utcnow() + timedelta(hours=REFRESH_TOKEN_EXPIRE_HOURS),
+        "iat": datetime.utcnow()
     }
     refresh_token = jwt.encode(refresh_payload, JWT_SECRET, algorithm=ALGORITHM)
     
@@ -47,9 +56,12 @@ async def admin_login(
     """
     Авторизация админа
     """
-    # Аутентификация (ВАЖНО: добавляем await!)
+    print(f"Login attempt for user: {login_data.username}")
+    
+    # Аутентификация
     user = await admin_user.authenticate(db, login_data.username, login_data.password)
     if not user:
+        print(f"Authentication failed for user: {login_data.username}")
         # Увеличиваем счетчик неудачных попыток если пользователь существует
         failed_user = await admin_user.get_by_username(db, login_data.username)
         if failed_user:
@@ -62,6 +74,7 @@ async def admin_login(
     
     # Проверяем активность
     if not admin_user.is_active(user):
+        print(f"User {login_data.username} is inactive")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Inactive user"
@@ -69,6 +82,7 @@ async def admin_login(
     
     # Проверяем блокировку
     if admin_user.is_locked(user):
+        print(f"User {login_data.username} is locked")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Account is locked due to multiple failed login attempts"
@@ -77,8 +91,10 @@ async def admin_login(
     # Создаем токены
     access_token, refresh_token = create_access_token(user.id)
     
-    # Обновляем время последнего входа (ВАЖНО: добавляем await!)
+    # Обновляем время последнего входа
     await admin_user.update_last_login(db, user)
+    
+    print(f"User {login_data.username} logged in successfully")
     
     return AdminLoginResponse(
         access_token=access_token,
@@ -90,37 +106,45 @@ async def admin_login(
 @router.post("/refresh")
 async def refresh_token(
     request: Request,
-    refresh_token: str,
+    token_data: RefreshTokenRequest,  # ИСПРАВЛЕНО: используем Pydantic модель
     db: AsyncSession = Depends(get_db)
 ):
     """
     Обновление access токена
     """
+    print("Refresh token request received")
+    
     try:
-        payload = jwt.decode(refresh_token, JWT_SECRET, algorithms=[ALGORITHM])
+        payload = jwt.decode(token_data.refresh_token, JWT_SECRET, algorithms=[ALGORITHM])
         user_id = int(payload.get("sub"))
         token_type = payload.get("type")
         
         if token_type != "refresh":
+            print("Invalid token type")
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Invalid token type"
             )
         
+        print(f"Refreshing token for user_id: {user_id}")
+        
     except jwt.ExpiredSignatureError:
+        print("Refresh token expired")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Token expired"
         )
-    except (jwt.InvalidTokenError, ValueError):
+    except (jwt.InvalidTokenError, ValueError) as e:
+        print(f"Invalid refresh token: {e}")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid token"
         )
     
-    # Проверяем что пользователь существует и активен (ВАЖНО: добавляем await!)
+    # Проверяем что пользователь существует и активен
     user = await admin_user.get(db, user_id)
     if not user or not admin_user.is_active(user):
+        print(f"User {user_id} not found or inactive")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="User not found or inactive"
@@ -129,6 +153,8 @@ async def refresh_token(
     # Создаем новые токены
     new_access_token, new_refresh_token = create_access_token(user.id)
     
+    print(f"New tokens created for user {user_id}")
+    
     return {
         "access_token": new_access_token,
         "refresh_token": new_refresh_token,
@@ -136,11 +162,10 @@ async def refresh_token(
         "expires_in": ACCESS_TOKEN_EXPIRE_MINUTES * 60
     }
 
-
 @router.get("/me")
 async def get_current_user(
     request: Request,
-    current_user: AdminUser = Depends(get_current_active_admin),  # Зависимость для проверки токена
+    current_user: AdminUser = Depends(get_current_active_admin),
     db: AsyncSession = Depends(get_db)
 ):
     """
@@ -158,12 +183,12 @@ async def get_current_user(
         "locked_until": current_user.locked_until.isoformat() if current_user.locked_until else None
     }
 
-
 @router.post("/logout")
 async def admin_logout():
     """
-    Выход из админки (пока просто заглушка)
+    Выход из админки
     """
+    print("User logout")
     return {"message": "Successfully logged out"}
 
 @router.get("/test")
@@ -171,4 +196,11 @@ async def test_endpoint():
     """
     Тестовый endpoint для проверки работы роутов
     """
-    return {"message": "Admin routes working!", "timestamp": datetime.utcnow()}
+    return {
+        "message": "Admin routes working!", 
+        "timestamp": datetime.utcnow(),
+        "token_config": {
+            "access_token_expire_minutes": ACCESS_TOKEN_EXPIRE_MINUTES,
+            "refresh_token_expire_hours": REFRESH_TOKEN_EXPIRE_HOURS
+        }
+    }
