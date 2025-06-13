@@ -1,4 +1,4 @@
-# app/api/endpoints/scraper.py (защищенная версия)
+# app/api/v1/scraper.py (защищенная версия)
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 from pydantic import BaseModel, HttpUrl
 from typing import List, Optional
@@ -17,6 +17,9 @@ from app.models.admin import AdminUser
 from datetime import datetime, timedelta
 from collections import defaultdict
 from app.core.config import settings, active_scraping_tasks
+import logging
+
+logger = logging.getLogger("scraper_router")
 
 router = APIRouter()
 
@@ -115,8 +118,8 @@ async def scrape_catalogs(
         print(f"URLs: {valid_urls}")
         print(f"Categories available: {categories_info['active_categories']}")
         
-        # Запускаем задачу Celery
-        task = scrape_labirint_multiple_catalogs_task.delay(valid_urls)
+        # Запускаем задачу Celery с передачей username
+        task = scrape_labirint_multiple_catalogs_task.delay(valid_urls, current_user.username)
         
         # Регистрируем задачу
         register_task(current_user, task.id)
@@ -221,8 +224,8 @@ async def scrape_bunker_doors_catalogs(
         print(f"CRITICAL_SCRAPING: Admin {current_user.username} starting Bunker Doors scraping")
         print(f"URLs: {valid_urls}")
         
-        # Запускаем задачу Celery
-        task = scrape_bunker_doors_multiple_catalogs_task.delay(valid_urls)
+        # Запускаем задачу Celery с передачей username
+        task = scrape_bunker_doors_multiple_catalogs_task.delay(valid_urls, current_user.username)
         
         # Регистрируем задачу
         register_task(current_user, task.id)
@@ -330,8 +333,8 @@ async def scrape_intecron_catalogs(
         print(f"CRITICAL_SCRAPING: Admin {current_user.username} starting Intecron scraping")
         print(f"URLs: {normalized_urls}")
         
-        # Запускаем задачу Celery
-        task = scrape_intecron_multiple_catalogs_task.delay(normalized_urls)
+        # Запускаем задачу Celery с передачей username
+        task = scrape_intecron_multiple_catalogs_task.delay(normalized_urls, current_user.username)
         
         # Регистрируем задачу
         register_task(current_user, task.id)
@@ -431,8 +434,8 @@ async def scrape_as_doors_catalogs(
         print(f"CRITICAL_SCRAPING: Admin {current_user.username} starting AS-Doors scraping")
         print(f"URLs: {normalized_urls}")
         
-        # Запускаем задачу Celery
-        task = scrape_as_doors_multiple_catalogs_task.delay(normalized_urls)
+        # Запускаем задачу Celery с передачей username
+        task = scrape_as_doors_multiple_catalogs_task.delay(normalized_urls, current_user.username)
         
         # Регистрируем задачу
         register_task(current_user, task.id)
@@ -514,6 +517,11 @@ async def get_active_tasks(
     # check_admin_rate_limit(request, max_requests=10, window_minutes=1)
     if not current_user.is_superuser:
         raise HTTPException(status_code=403, detail="Доступ запрещен. Только суперадмин может просматривать активные задачи.")
+    
+    # НОВОЕ: Синхронизируем перед отображением
+    from app.crud.scraper import sync_task_counters
+    sync_result = sync_task_counters()
+    
     total_tasks = sum(active_scraping_tasks.values())
     
     return {
@@ -521,6 +529,7 @@ async def get_active_tasks(
         "max_global_limit": settings.MAX_CONCURRENT_TASKS_GLOBAL,
         "max_user_limit": settings.MAX_CONCURRENT_TASKS_PER_USER,
         "tasks_by_user": dict(active_scraping_tasks),
+        "sync_info": sync_result,  # Добавляем информацию о синхронизации
         "requested_by": current_user.username,
         "timestamp": datetime.utcnow()
     }
@@ -551,6 +560,29 @@ async def cancel_all_tasks(
         "timestamp": datetime.utcnow()
     }
 
+@router.post("/cleanup-dead-tasks")
+async def cleanup_dead_tasks(
+    request: Request,
+    current_user: AdminUser = Depends(get_current_superuser)  # ТОЛЬКО СУПЕРАДМИН
+):
+    """
+    Очистка "мертвых" задач (только суперадмин)
+    """
+    check_admin_rate_limit(request, max_requests=5, window_minutes=5)
+    
+    from app.crud.scraper import cleanup_dead_tasks
+    
+    cleaned_count = cleanup_dead_tasks()
+    
+    logger.info(f"DEAD_TASKS_CLEANUP: Superuser {current_user.username} cleaned {cleaned_count} dead tasks")
+    
+    return {
+        "message": f"Очищено {cleaned_count} мертвых задач",
+        "cleaned_tasks": cleaned_count,
+        "cleaned_by": current_user.username,
+        "timestamp": datetime.utcnow()
+    }
+
 @router.get("/check-readiness")
 async def check_scraper_readiness(
     request: Request,
@@ -560,6 +592,10 @@ async def check_scraper_readiness(
     Проверяет готовность системы к запуску скрайперов
     """
     # check_admin_rate_limit(request, max_requests=10, window_minutes=1)
+    
+    # НОВОЕ: Синхронизируем счетчики перед проверкой
+    from app.crud.scraper import sync_task_counters
+    sync_result = sync_task_counters()
     
     categories_info = await check_categories_exist()
     user_tasks = active_scraping_tasks[current_user.username]
@@ -575,6 +611,7 @@ async def check_scraper_readiness(
             "max_total_tasks": settings.MAX_CONCURRENT_TASKS_GLOBAL,
             "can_start_task": user_tasks < settings.MAX_CONCURRENT_TASKS_PER_USER and total_tasks < settings.MAX_CONCURRENT_TASKS_GLOBAL
         },
+        "sync_info": sync_result,  # Добавляем информацию о синхронизации
         "issues": []
     }
     
@@ -601,3 +638,64 @@ async def check_scraper_readiness(
         })
     
     return readiness
+
+@router.post("/sync-tasks")
+async def sync_task_status(
+    request: Request,
+    current_user: AdminUser = Depends(get_current_active_admin)
+):
+    """
+    Принудительная синхронизация счетчиков задач с реальным состоянием в Celery
+    """
+    check_admin_rate_limit(request, max_requests=10, window_minutes=1)
+    
+    from app.crud.scraper import sync_task_counters
+    
+    old_user_tasks = active_scraping_tasks[current_user.username]
+    old_total_tasks = sum(active_scraping_tasks.values())
+    
+    sync_result = sync_task_counters()
+    
+    new_user_tasks = active_scraping_tasks[current_user.username]
+    new_total_tasks = sum(active_scraping_tasks.values())
+    
+    logger.info(f"MANUAL_SYNC: User {current_user.username} synced tasks. "
+               f"User: {old_user_tasks} -> {new_user_tasks}, Total: {old_total_tasks} -> {new_total_tasks}")
+    
+    return {
+        "message": "Синхронизация завершена",
+        "before": {
+            "user_tasks": old_user_tasks,
+            "total_tasks": old_total_tasks
+        },
+        "after": {
+            "user_tasks": new_user_tasks,
+            "total_tasks": new_total_tasks
+        },
+        "sync_details": sync_result,
+        "user": current_user.username,
+        "timestamp": datetime.utcnow()
+    }
+
+@router.post("/cleanup-my-tasks")
+async def cleanup_my_tasks(
+    request: Request,
+    current_user: AdminUser = Depends(get_current_active_admin)
+):
+    """
+    Принудительная очистка всех задач текущего пользователя
+    """
+    from app.crud.scraper import force_cleanup_user_tasks
+    
+    check_admin_rate_limit(request, max_requests=5, window_minutes=5)
+    
+    cleaned_count = force_cleanup_user_tasks(current_user.username)
+    
+    logger.info(f"USER_CLEANUP: User {current_user.username} cleaned {cleaned_count} tasks")
+    
+    return {
+        "message": f"Очищено {cleaned_count} ваших задач",
+        "cleaned_tasks": cleaned_count,
+        "user": current_user.username,
+        "timestamp": datetime.utcnow()
+    }

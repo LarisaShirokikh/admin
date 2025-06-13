@@ -16,6 +16,7 @@ from .product_ranking import ProductRanking
 from .user import User
 from .analytics import AnalyticsEvent, AnalyticsSession, AnalyticsDailySummary
 from .admin import AdminUser
+from .posts import Post, PostAuthor, PostTag, PostMedia, PostView, PostLike
 
 # Импорт связующих таблиц
 from .attributes import product_categories
@@ -39,5 +40,11 @@ __all__ = [
     "AnalyticsEvent",
     "AnalyticsSession",
     "AnalyticsDailySummary",
-    "AdminUser"
+    "AdminUser",
+    "PostAuthor",
+    "PostTag",
+    "PostMedia",
+    "Post",
+    "PostView",
+    "PostLike",
 ]

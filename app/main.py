@@ -12,6 +12,7 @@ from app.api.v1.scraper import router as scraper_router
 from app.api.v1.video import router as video_router
 from app.api.v1.brands import router as brand_router
 from app.api.v1.admin.auth import router as admin_auth_router
+from app.api.v1.posts import router as posts_router
 from app.core.config import Settings
 
 app = FastAPI(
@@ -78,6 +79,8 @@ app.include_router(scraper_router, prefix="/api/v1/scraper", tags=["Scrapers"])
 app.include_router(video_router, prefix="/api/v1/video", tags=["Video"])
 app.include_router(brand_router, prefix="/api/v1/brands", tags=["Brand"])
 app.include_router(admin_auth_router, prefix="/api/v1/admin/auth", tags=["Auth"])
+app.include_router(posts_router, prefix="/posts", tags=["posts"])
+
 
 
 os.makedirs("media", exist_ok=True)

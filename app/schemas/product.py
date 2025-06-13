@@ -109,7 +109,26 @@ class ProductFilter(BaseModel):
     page: int = Field(default=1, ge=1)
     per_page: int = Field(default=20, ge=1, le=100)
 
-# Дополнительные схемы
+class ProductImageBase(BaseModel):
+    url: str
+    is_main: bool = False
+    alt_text: Optional[str] = None
+
+class ProductImageCreate(ProductImageBase):
+    pass
+
+class ProductImageUpdate(BaseModel):
+    url: Optional[str] = None
+    is_main: Optional[bool] = None
+    alt_text: Optional[str] = None
+
+class ProductImage(ProductImageBase):
+    id: int
+    product_id: int
+
+    class Config:
+        from_attributes = True
+        
 class ProductResponse(ProductDetail):
     """Алиас для ProductDetail"""
     pass
@@ -144,7 +163,6 @@ class BatchUpdateResponse(BaseModel):
 
     class Config:
         from_attributes = True
-
 
 class PriceUpdateRequest(BaseModel):
     scope: str = Field(..., description="Область применения: all, brand, category, catalog")

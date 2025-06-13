@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from typing import List, Optional
 from sqlalchemy import and_, select
 from sqlalchemy.orm import selectinload
+from app.models.product_image import ProductImage as ProductImageModel
 
 from app.models.category import Category
 from app.models.product import Product
@@ -17,7 +18,8 @@ from app.schemas.product import (
     PriceUpdateResponse,
     ProductCountRequest,
     ProductDetail, 
-    ProductCreate, 
+    ProductCreate,
+    ProductImage, 
     ProductUpdate,
     ProductListItem,
     ProductFilter,
@@ -309,6 +311,49 @@ async def get_product(
     print(f"Admin {current_user.username} viewed product {product_id}")
     return product
 
+@router.get("/{product_id}/images", response_model=List[ProductImage])
+async def get_product_images(
+    request: Request,
+    product_id: int,
+    current_user: AdminUser = Depends(get_current_active_admin),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Получить все изображения продукта по его ID
+    """
+    check_admin_rate_limit(request)
+    
+    try:
+        # Проверяем существование продукта
+        product = await get_product_by_id_with_relations(db, product_id)
+        if not product:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Продукт с ID {product_id} не найден"
+            )
+        
+        # Получаем изображения из связи product_images (более эффективно)
+        if hasattr(product, 'product_images') and product.product_images:
+            print(f"Admin {current_user.username} requested images for product {product_id}: {len(product.product_images)} images found")
+            return product.product_images
+        
+        # Если по какой-то причине не загрузились через связь, делаем отдельный запрос
+        images_result = await db.execute(
+            select(ProductImageModel).where(ProductImageModel.product_id == product_id).order_by(ProductImageModel.is_main.desc(), ProductImageModel.id)
+        )
+        images = images_result.scalars().all()
+        
+        print(f"Admin {current_user.username} requested images for product {product_id}: {len(images)} images found")
+        return images
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"ERROR: Failed to get images for product {product_id}: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Ошибка при получении изображений: {str(e)}"
+        )
 # ========== POST эндпоинты (создание - для всех админов) ==========
 
 @router.post("/", response_model=ProductDetail, status_code=status.HTTP_201_CREATED)

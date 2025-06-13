@@ -16,6 +16,9 @@ from app.scrapers.bunker_doors import BunkerDoorsScraper
 from app.services.csv_import import import_products_from_df
 from app.scrapers import AsDoorsScraper, LabirintScraper, IntecronScraper
 
+# НОВЫЙ ИМПОРТ для снятия задач с учета
+from app.crud.scraper import unregister_task_by_username
+
 logging.basicConfig(level=logging.INFO, format='[%(levelname)s] %(message)s')
 logger = logging.getLogger('celery_tasks')
 
@@ -47,56 +50,12 @@ def import_csv_task(file_path: str):
 
     loop.run_until_complete(run())
 
-@celery_app.task(bind=True, max_retries=3)
-def scrape_labirint_task(self):
-    """Запуск скрейпера Labirint Doors с автоматической категоризацией"""
-    logger.info("!!! Celery: запускаем scrape_labirint_task с категоризацией !!!")
-
-    try:
-        # Создаем или получаем event loop
-        try:
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-        except RuntimeError:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            
-        async def run_scraper():
-            # Получаем список каталогов для парсинга
-            # Здесь можно задать конкретные URL или получить их из базы данных
-            catalog_urls = [
-                'https://labirintdoors.ru/category/imperial',
-                'https://labirintdoors.ru/category/grand',
-                'https://labirintdoors.ru/category/piano',
-                # Добавьте другие URL каталогов здесь
-            ]
-            
-            async with AsyncSessionLocal() as db:
-                # Создаем экземпляр скрапера и запускаем парсинг
-                scraper = LabirintScraper()
-                return await scraper.parse_multiple_catalogs(catalog_urls, db)
-                
-        result = loop.run_until_complete(run_scraper())
-        logger.info("!!! Celery: scrape_labirint_task завершена успешно !!!")
-        return result
-    except Exception as e:
-        logger.error(f"!!! Celery: ОШИБКА в scrape_labirint_task: {str(e)} !!!")
-        traceback.print_exc()
-
-        try:
-            self.retry(exc=e, countdown=30)
-        except Exception as retry_e:
-            logger.error(f"!!! Celery: Ошибка при повторе задачи: {str(retry_e)} !!!")
-            return False
-
 @shared_task(bind=True, max_retries=3)
-def scrape_labirint_multiple_catalogs_task(self, catalog_urls: List[str]):
+def scrape_labirint_multiple_catalogs_task(self, catalog_urls: List[str], username: str):
     """
     Celery задача для парсинга с динамической категоризацией
     """
-    logger.info(f"Запуск задачи парсинга {len(catalog_urls)} каталогов Labirint")
+    logger.info(f"Запуск задачи парсинга {len(catalog_urls)} каталогов Labirint для пользователя {username}")
     
     # Создаем новый event loop для каждого запуска задачи
     try:
@@ -187,7 +146,11 @@ def scrape_labirint_multiple_catalogs_task(self, catalog_urls: List[str]):
             }
         )
         
-        self.retry(exc=e, countdown=countdown)
+        # НЕ делаем retry, если это последняя попытка - чтобы задача завершилась
+        if self.request.retries >= self.max_retries:
+            raise e
+        else:
+            self.retry(exc=e, countdown=countdown)
         
         return {
             'status': 'error',
@@ -195,66 +158,32 @@ def scrape_labirint_multiple_catalogs_task(self, catalog_urls: List[str]):
             'message': "Парсинг Labirint завершился с ошибкой"
         }
     finally:
+        # КРИТИЧЕСКИ ВАЖНО: Автоматически снимаем задачу с учета при завершении
+        try:
+            unregister_task_by_username(username, self.request.id)
+            logger.info(f"Task {self.request.id} automatically unregistered for user {username}")
+        except Exception as cleanup_error:
+            logger.error(f"Failed to unregister task {self.request.id}: {cleanup_error}")
+        
         # Очищаем текущий event loop, но не закрываем его
         if 'loop' in locals() and loop.is_running():
             loop.stop()
         # Удаляем ссылку на event loop из текущего потока
         asyncio.set_event_loop(None)
 
-@celery_app.task(bind=True, max_retries=3)
-def scrape_intecron_task(self):
-    """Запуск скрейпера Intecron с автоматической категоризацией"""
-    logger.info("!!! Celery: запускаем scrape_intecron_task с категоризацией !!!")
-
-    try:
-        # Создаем или получаем event loop
-        try:
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-        except RuntimeError:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            
-        async def run_scraper():
-            # Получаем список каталогов для парсинга
-            # Здесь можно задать конкретные URL или получить их из базы данных
-            catalog_urls = [
-                'https://intecron-msk.ru/catalog/doors/',
-                'https://intecron-msk.ru/catalog/premium/',
-                # Добавьте другие URL каталогов здесь
-            ]
-            
-            async with AsyncSessionLocal() as db:
-                # Создаем экземпляр скрапера и запускаем парсинг
-                scraper = IntecronScraper()
-                return await scraper.parse_multiple_catalogs(catalog_urls, db)
-                
-        result = loop.run_until_complete(run_scraper())
-        logger.info("!!! Celery: scrape_intecron_task завершена успешно !!!")
-        return result
-    except Exception as e:
-        logger.error(f"!!! Celery: ОШИБКА в scrape_intecron_task: {str(e)} !!!")
-        traceback.print_exc()
-
-        try:
-            self.retry(exc=e, countdown=30)
-        except Exception as retry_e:
-            logger.error(f"!!! Celery: Ошибка при повторе задачи: {str(retry_e)} !!!")
-            return False
-
 @shared_task(bind=True, max_retries=3)
-def scrape_intecron_multiple_catalogs_task(self, catalog_urls: Optional[List[str]] = None):
+def scrape_intecron_multiple_catalogs_task(self, catalog_urls: Optional[List[str]] = None, username: str = "unknown"):
     """
     Задача Celery для парсинга нескольких каталогов Intecron с автокатегоризацией.
     """
     # Проверяем, что URL указаны и не пустые
     if not catalog_urls:
         logger.error("!!! Celery: список URL каталогов пуст !!!")
+        # Снимаем задачу с учета даже при ошибке
+        unregister_task_by_username(username, self.request.id)
         return False
         
-    logger.info(f"!!! Celery: запуск задачи scrape_intecron_multiple_catalogs_task с {len(catalog_urls)} каталогами !!!")
+    logger.info(f"!!! Celery: запуск задачи scrape_intecron_multiple_catalogs_task с {len(catalog_urls)} каталогами для пользователя {username} !!!")
     logger.info(f"!!! Celery: URL для парсинга: {catalog_urls} !!!")
     
     try:
@@ -291,18 +220,29 @@ def scrape_intecron_multiple_catalogs_task(self, catalog_urls: Optional[List[str
         logger.error(f"!!! Celery: Ошибка при выполнении задачи: {exc} !!!")
         logger.error(traceback.format_exc())
         
-        # Повторяем задачу с экспоненциальной задержкой
-        countdown = 30 * (2 ** self.request.retries)  # 30 сек, 60 сек, 120 сек
-        self.retry(exc=exc, countdown=countdown)
+        # НЕ делаем retry, если это последняя попытка
+        if self.request.retries >= self.max_retries:
+            raise exc
+        else:
+            # Повторяем задачу с экспоненциальной задержкой
+            countdown = 30 * (2 ** self.request.retries)  # 30 сек, 60 сек, 120 сек
+            self.retry(exc=exc, countdown=countdown)
         
         return False
+    finally:
+        # КРИТИЧЕСКИ ВАЖНО: Автоматически снимаем задачу с учета при завершении
+        try:
+            unregister_task_by_username(username, self.request.id)
+            logger.info(f"Task {self.request.id} automatically unregistered for user {username}")
+        except Exception as cleanup_error:
+            logger.error(f"Failed to unregister task {self.request.id}: {cleanup_error}")
     
 @shared_task(bind=True, max_retries=3)
-def scrape_as_doors_multiple_catalogs_task(self, catalog_urls: List[str]):
+def scrape_as_doors_multiple_catalogs_task(self, catalog_urls: List[str], username: str):
     """
     Celery задача для парсинга нескольких каталогов AS-Doors
     """
-    logger.info(f"Запуск задачи парсинга {len(catalog_urls)} каталогов AS-Doors")
+    logger.info(f"Запуск задачи парсинга {len(catalog_urls)} каталогов AS-Doors для пользователя {username}")
     
     # Создаем новый event loop для каждого запуска задачи
     try:
@@ -350,9 +290,6 @@ def scrape_as_doors_multiple_catalogs_task(self, catalog_urls: List[str]):
     except Exception as e:
         logger.error(f"Ошибка при парсинге AS-Doors: {e}", exc_info=True)
         
-        # Повторяем задачу с экспоненциальной задержкой
-        countdown = 30 * (2 ** self.request.retries)  # 30 сек, 60 сек, 120 сек
-        
         self.update_state(
             state="FAILURE",
             meta={
@@ -361,7 +298,13 @@ def scrape_as_doors_multiple_catalogs_task(self, catalog_urls: List[str]):
             }
         )
         
-        self.retry(exc=e, countdown=countdown)
+        # НЕ делаем retry, если это последняя попытка
+        if self.request.retries >= self.max_retries:
+            raise e
+        else:
+            # Повторяем задачу с экспоненциальной задержкой
+            countdown = 30 * (2 ** self.request.retries)  # 30 сек, 60 сек, 120 сек
+            self.retry(exc=e, countdown=countdown)
         
         return {
             'status': 'error',
@@ -369,6 +312,13 @@ def scrape_as_doors_multiple_catalogs_task(self, catalog_urls: List[str]):
             'message': "Парсинг AS-Doors завершился с ошибкой"
         }
     finally:
+        # КРИТИЧЕСКИ ВАЖНО: Автоматически снимаем задачу с учета при завершении
+        try:
+            unregister_task_by_username(username, self.request.id)
+            logger.info(f"Task {self.request.id} automatically unregistered for user {username}")
+        except Exception as cleanup_error:
+            logger.error(f"Failed to unregister task {self.request.id}: {cleanup_error}")
+        
         # Очищаем текущий event loop, но не закрываем его
         if 'loop' in locals() and loop.is_running():
             loop.stop()
@@ -377,11 +327,11 @@ def scrape_as_doors_multiple_catalogs_task(self, catalog_urls: List[str]):
 
 
 @shared_task(bind=True, max_retries=3)
-def scrape_bunker_doors_multiple_catalogs_task(self, catalog_urls: List[str]):
+def scrape_bunker_doors_multiple_catalogs_task(self, catalog_urls: List[str], username: str):
     """
     Celery задача для парсинга каталогов Bunker Doors
     """
-    logger.info(f"Запуск задачи парсинга {len(catalog_urls)} каталогов Bunker Doors")
+    logger.info(f"Запуск задачи парсинга {len(catalog_urls)} каталогов Bunker Doors для пользователя {username}")
     
     # Создаем новый event loop для каждого запуска задачи
     try:
@@ -457,9 +407,6 @@ def scrape_bunker_doors_multiple_catalogs_task(self, catalog_urls: List[str]):
     except Exception as e:
         logger.error(f"Ошибка при парсинге Bunker Doors: {e}", exc_info=True)
         
-        # Повторяем задачу с экспоненциальной задержкой
-        countdown = 30 * (2 ** self.request.retries)  # 30 сек, 60 сек, 120 сек
-        
         self.update_state(
             state="FAILURE",
             meta={
@@ -469,7 +416,13 @@ def scrape_bunker_doors_multiple_catalogs_task(self, catalog_urls: List[str]):
             }
         )
         
-        self.retry(exc=e, countdown=countdown)
+        # НЕ делаем retry, если это последняя попытка
+        if self.request.retries >= self.max_retries:
+            raise e
+        else:
+            # Повторяем задачу с экспоненциальной задержкой
+            countdown = 30 * (2 ** self.request.retries)  # 30 сек, 60 сек, 120 сек
+            self.retry(exc=e, countdown=countdown)
         
         return {
             'status': 'error',
@@ -477,6 +430,13 @@ def scrape_bunker_doors_multiple_catalogs_task(self, catalog_urls: List[str]):
             'message': "Парсинг Bunker Doors завершился с ошибкой"
         }
     finally:
+        # КРИТИЧЕСКИ ВАЖНО: Автоматически снимаем задачу с учета при завершении
+        try:
+            unregister_task_by_username(username, self.request.id)
+            logger.info(f"Task {self.request.id} automatically unregistered for user {username}")
+        except Exception as cleanup_error:
+            logger.error(f"Failed to unregister task {self.request.id}: {cleanup_error}")
+        
         # Очищаем текущий event loop, но не закрываем его
         if 'loop' in locals() and loop.is_running():
             loop.stop()

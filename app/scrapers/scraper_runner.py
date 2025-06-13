@@ -2,7 +2,7 @@ import asyncio
 import logging
 from app.core.database import AsyncSessionLocal
 from app.crud.product import create_or_update_product, create_product
-from app.scrapers.intecron import classify_and_update_product, ensure_brand_exists, get_category_map, parse_catalog_page, update_category_counters
+from app.scrapers.intecron import  ensure_brand_exists, parse_catalog_page
 from app.scrapers.labirint import parse_labirint_products
 
 # Настройка логирования
