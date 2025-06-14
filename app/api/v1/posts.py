@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy.orm import Session
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.database import get_async_db
+from app.deps.database import get_db
 from app.crud.posts import get_posts_crud, PostsCRUD
 from app.schemas.posts import (
     Post, PostListItem, PostListResponse, PostSearchParams,
@@ -34,7 +34,7 @@ def get_client_ip(request: Request) -> str:
 async def get_featured_posts(
     limit: int = Query(default=6, ge=1, le=20),
     is_published: bool = Query(default=True),
-    db: AsyncSession = Depends(get_async_db)
+    db: AsyncSession = Depends(get_db)
 ):
     """Получить рекомендуемые посты"""
     crud = get_posts_crud(db)
@@ -46,7 +46,7 @@ async def get_featured_posts(
 async def get_recent_posts(
     limit: int = Query(default=12, ge=1, le=50),
     is_published: bool = Query(default=True),
-    db: AsyncSession = Depends(get_async_db)
+    db: AsyncSession = Depends(get_db)
 ):
     """Получить последние посты"""
     crud = get_posts_crud(db)
@@ -57,7 +57,7 @@ async def get_recent_posts(
 @router.get("/pinned/", response_model=List[PostListItem])
 async def get_pinned_posts(
     is_published: bool = Query(default=True),
-    db: AsyncSession = Depends(get_async_db)
+    db: AsyncSession = Depends(get_db)
 ):
     """Получить закрепленные посты"""
     crud = get_posts_crud(db)
@@ -68,7 +68,7 @@ async def get_pinned_posts(
 @router.get("/popular/", response_model=List[PostListItem])
 async def get_popular_posts(
     limit: int = Query(default=10, ge=1, le=20),
-    db: AsyncSession = Depends(get_async_db)
+    db: AsyncSession = Depends(get_db)
 ):
     """Получить популярные посты"""
     crud = get_posts_crud(db)
@@ -86,7 +86,7 @@ async def search_posts(
     per_page: int = Query(default=20, ge=1, le=100),
     order_by: str = Query(default="created_at", description="Поле для сортировки"),
     order_dir: str = Query(default="desc", description="Направление сортировки"),
-    db: AsyncSession = Depends(get_async_db)
+    db: AsyncSession = Depends(get_db)
 ):
     """Поиск постов с фильтрацией"""
     # Валидируем параметры сортировки
@@ -125,7 +125,7 @@ async def search_posts(
 @router.get("/{slug}/", response_model=Post)
 async def get_post_by_slug(
     slug: str,
-    db: AsyncSession = Depends(get_async_db)
+    db: AsyncSession = Depends(get_db)
 ):
     """Получить пост по slug"""
     crud = get_posts_crud(db)
@@ -144,7 +144,7 @@ async def get_post_by_slug(
 async def track_post_view(
     post_id: int,
     request: Request,
-    db: AsyncSession = Depends(get_async_db)
+    db: AsyncSession = Depends(get_db)
 ):
     """Отследить просмотр поста"""
     crud = get_posts_crud(db)
@@ -171,7 +171,7 @@ async def track_post_view(
 async def like_post(
     post_id: int,
     request: Request,
-    db: AsyncSession = Depends(get_async_db)
+    db: AsyncSession = Depends(get_db)
 ):
     """Поставить лайк посту"""
     crud = get_posts_crud(db)
@@ -200,7 +200,7 @@ async def like_post(
 @router.get("/tags/popular/", response_model=List[PopularTag])
 async def get_popular_tags(
     limit: int = Query(default=8, ge=1, le=20),
-    db: AsyncSession = Depends(get_async_db)
+    db: AsyncSession = Depends(get_db)
 ):
     """Получить популярные теги"""
     crud = get_posts_crud(db)
@@ -213,7 +213,7 @@ async def get_posts_by_tag(
     tag_slug: str,
     page: int = Query(default=1, ge=1),
     per_page: int = Query(default=20, ge=1, le=100),
-    db: AsyncSession = Depends(get_async_db)
+    db: AsyncSession = Depends(get_db)
 ):
     """Получить посты по тегу"""
     crud = get_posts_crud(db)
@@ -256,7 +256,7 @@ async def list_posts(
     author_id: Optional[int] = Query(None),
     order_by: str = Query(default="created_at"),
     order_dir: str = Query(default="desc"),
-    db: AsyncSession = Depends(get_async_db)
+    db: AsyncSession = Depends(get_db)
 ):
     """Получить список всех постов (административный)"""
     crud = get_posts_crud(db)
@@ -286,7 +286,7 @@ async def list_posts(
 @router.post("/", response_model=Post)
 async def create_post(
     post_data: PostCreate,
-    db: AsyncSession = Depends(get_async_db)
+    db: AsyncSession = Depends(get_db)
 ):
     """Создать новый пост"""
     crud = get_posts_crud(db)
@@ -301,7 +301,7 @@ async def create_post(
 @router.get("/{post_id}/", response_model=Post)
 async def get_post(
     post_id: int,
-    db: AsyncSession = Depends(get_async_db)
+    db: AsyncSession = Depends(get_db)
 ):
     """Получить пост по ID"""
     crud = get_posts_crud(db)
@@ -317,7 +317,7 @@ async def get_post(
 async def update_post(
     post_id: int,
     post_data: PostUpdate,
-    db: AsyncSession = Depends(get_async_db)
+    db: AsyncSession = Depends(get_db)
 ):
     """Обновить пост"""
     crud = get_posts_crud(db)
@@ -334,7 +334,7 @@ async def update_post(
 @router.delete("/{post_id}/")
 async def delete_post(
     post_id: int,
-    db: AsyncSession = Depends(get_async_db)
+    db: AsyncSession = Depends(get_db)
 ):
     """Удалить пост"""
     crud = get_posts_crud(db)
@@ -351,7 +351,7 @@ async def delete_post(
 @router.post("/authors/", response_model=PostAuthor)
 async def create_author(
     author_data: PostAuthorCreate,
-    db: AsyncSession = Depends(get_async_db)
+    db: AsyncSession = Depends(get_db)
 ):
     """Создать автора"""
     crud = get_posts_crud(db)
@@ -362,7 +362,7 @@ async def create_author(
 @router.get("/authors/{author_id}/", response_model=PostAuthor)
 async def get_author(
     author_id: int,
-    db: AsyncSession = Depends(get_async_db)
+    db: AsyncSession = Depends(get_db)
 ):
     """Получить автора"""
     crud = get_posts_crud(db)
@@ -379,7 +379,7 @@ async def get_author(
 @router.post("/tags/", response_model=PostTag)
 async def create_tag(
     tag_data: PostTagCreate,
-    db: AsyncSession = Depends(get_async_db)
+    db: AsyncSession = Depends(get_db)
 ):
     """Создать тег"""
     crud = get_posts_crud(db)
@@ -393,7 +393,7 @@ async def create_tag(
 async def create_post_media(
     post_id: int,
     media_data: PostMediaCreate,
-    db: AsyncSession = Depends(get_async_db)
+    db: AsyncSession = Depends(get_db)
 ):
     """Добавить медиа к посту"""
     crud = get_posts_crud(db)
@@ -411,7 +411,7 @@ async def create_post_media(
 @router.get("/{post_id}/media/", response_model=List[PostMedia])
 async def get_post_media(
     post_id: int,
-    db: AsyncSession = Depends(get_async_db)
+    db: AsyncSession = Depends(get_db)
 ):
     """Получить медиа поста"""
     crud = get_posts_crud(db)
