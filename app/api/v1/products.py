@@ -5,7 +5,7 @@ import tempfile
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 from typing import List, Optional
-from sqlalchemy import and_, select
+from sqlalchemy import and_, select, func
 from sqlalchemy.orm import selectinload
 from app.models.product_image import ProductImage as ProductImageModel
 
@@ -25,34 +25,14 @@ from app.schemas.product import (
     ProductFilter,
     ProductResponse,
 )
-from app.crud.product import (
-    calculate_new_prices,
-    get_product_by_title,
-    delete_product,
-    log_bulk_price_update,
-    soft_delete_product,
-    get_products_count,
-    toggle_product_status,
-    create_or_update_product,
-    # Новые функции с подгрузкой связей
-    get_product_by_id_with_relations,
-    get_product_by_slug_with_relations,
-    get_products_paginated_with_relations,
-    get_all_products_filtered_with_relations,
-    update_product_with_relations,
-    create_product_with_relations,
-    validate_prices
-)
-from app.deps import get_db  # Исправлен импорт
+from app.crud import product as crud 
+from app.deps import get_db 
 from app.worker.tasks import import_csv_task
-
-# НОВЫЕ ИМПОРТЫ для защиты
 from app.deps.admin_auth import get_current_active_admin, get_current_superuser, check_admin_rate_limit
 from app.models.admin import AdminUser
 
 router = APIRouter()
 
-# ========== GET эндпоинты (чтение - для всех админов) ==========
 
 @router.get("/", response_model=List[ProductListItem])
 async def list_products(
@@ -79,7 +59,7 @@ async def list_products(
     
     print(f"Admin {current_user.username} accessing products list (skip={skip}, limit={limit})")
     
-    products, total_count = await get_products_paginated_with_relations(
+    products, total_count = await crud.get_products_paginated_with_relations(
         db=db,
         skip=skip,
         limit=limit,
@@ -134,17 +114,17 @@ async def get_products_stats(
     check_admin_rate_limit(request, max_requests=20, window_minutes=1)
     
     # Получаем базовую статистику
-    total_products = await get_products_count(db, is_active=None)  # Все продукты
-    active_products = await get_products_count(db, is_active=True)
+    total_products = await crud.get_products_count(db, is_active=None)  # Все продукты
+    active_products = await crud.get_products_count(db, is_active=True)
     inactive_products = total_products - active_products
     
     # Дополнительная статистика по брендам и каталогам
-    with_brand = await get_products_count(db, has_brand=True)
-    without_brand = await get_products_count(db, has_brand=False)
-    with_catalog = await get_products_count(db, has_catalog=True)
-    without_catalog = await get_products_count(db, has_catalog=False)
-    in_stock = await get_products_count(db, in_stock=True)
-    out_of_stock = await get_products_count(db, in_stock=False)
+    with_brand = await crud.get_products_count(db, has_brand=True)
+    without_brand = await crud.get_products_count(db, has_brand=False)
+    with_catalog = await crud.get_products_count(db, has_catalog=True)
+    without_catalog = await crud.get_products_count(db, has_catalog=False)
+    in_stock = await crud.get_products_count(db, in_stock=True)
+    out_of_stock = await crud.get_products_count(db, in_stock=False)
     
     stats = {
         "total_products": total_products,
@@ -183,7 +163,7 @@ async def get_products_count_endpoint(
     """
     check_admin_rate_limit(request)
     
-    count = await get_products_count(
+    count = await crud.get_products_count(
         db=db,
         search=search,  # Добавлено
         brand_id=brand_id,
@@ -208,7 +188,7 @@ async def filter_products(
     """
     check_admin_rate_limit(request)  # Rate limiting
     
-    products = await get_all_products_filtered_with_relations(
+    products = await crud.get_all_products_filtered_with_relations(
         db=db,
         brand_id=product_filter.brand_id,
         category_id=product_filter.category_id,
@@ -243,7 +223,7 @@ async def get_product_by_title_route(
     """
     check_admin_rate_limit(request)  # Rate limiting
     
-    product = await get_product_by_title(db, title)
+    product = await crud.get_product_by_title(db, title)
     if not product:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -255,17 +235,15 @@ async def get_product_by_title_route(
 
 @router.get("/by-slug/{slug}", response_model=ProductDetail)
 async def get_product_by_slug_route(
-    request: Request,  # Добавляем Request
+    request: Request,  
     slug: str,
-    current_user: AdminUser = Depends(get_current_active_admin),  # ЗАЩИТА
+    current_user: AdminUser = Depends(get_current_active_admin),  
     db: AsyncSession = Depends(get_db)
 ):
-    """
-    Получить продукт по slug с полными объектами брендов, каталогов и категорий
-    """
+    
     check_admin_rate_limit(request)  # Rate limiting
     
-    product = await get_product_by_slug_with_relations(db, slug)
+    product = await crud.get_product_by_slug_with_relations(db, slug)
     if not product:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -294,7 +272,7 @@ async def get_product(
     """
     check_admin_rate_limit(request)  # Rate limiting
     
-    product = await get_product_by_id_with_relations(db, product_id)
+    product = await crud.get_product_by_id_with_relations(db, product_id)
     if not product:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -325,7 +303,7 @@ async def get_product_images(
     
     try:
         # Проверяем существование продукта
-        product = await get_product_by_id_with_relations(db, product_id)
+        product = await crud.get_product_by_id_with_relations(db, product_id)
         if not product:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
@@ -358,39 +336,34 @@ async def get_product_images(
 
 @router.post("/", response_model=ProductDetail, status_code=status.HTTP_201_CREATED)
 async def create_product_endpoint(
-    request: Request,  # Добавляем Request
+    request: Request,  
     product: ProductCreate,
-    current_user: AdminUser = Depends(get_current_active_admin),  # ЗАЩИТА
+    current_user: AdminUser = Depends(get_current_active_admin),  #
     db: AsyncSession = Depends(get_db)
 ):
-    """
-    Создать новый продукт с возвратом полного объекта со связями
-    """
-    check_admin_rate_limit(request, max_requests=30, window_minutes=1)  # Rate limiting для создания
+    
+    check_admin_rate_limit(request, max_requests=30, window_minutes=1)  
     
     try:
-        # Логируем действие админа
         print(f"Admin {current_user.username} creating product: {product.name}")
         
-        created_product = await create_product_with_relations(db, product, auto_commit=True)
+        created_product = await crud.create_product_with_relations(db, product, auto_commit=True)
         if not created_product:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Не удалось создать продукт"
             )
         
-        # Добавляем main_image
+        
         if hasattr(created_product, 'product_images') and created_product.product_images:
             main_img = next((img for img in created_product.product_images if getattr(img, 'is_main', False)), None)
             created_product.main_image = main_img.url if main_img else created_product.product_images[0].url
         else:
             created_product.main_image = None
         
-        print(f"SUCCESS: Product '{created_product.name}' created with ID {created_product.id}")
         return created_product
         
     except Exception as e:
-        print(f"ERROR: Failed to create product by {current_user.username}: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Ошибка при создании продукта: {str(e)}"
@@ -398,21 +371,17 @@ async def create_product_endpoint(
 
 @router.post("/create-or-update", response_model=ProductDetail)
 async def create_or_update_product_endpoint(
-    request: Request,  # Добавляем Request
+    request: Request,  
     product: ProductCreate,
-    current_user: AdminUser = Depends(get_current_active_admin),  # ЗАЩИТА
+    current_user: AdminUser = Depends(get_current_active_admin), 
     db: AsyncSession = Depends(get_db)
 ):
-    """
-    Создать новый продукт или обновить существующий с возвратом полного объекта
-    """
+   
     check_admin_rate_limit(request, max_requests=30, window_minutes=1)  # Rate limiting
     
     try:
-        # Логируем действие админа
-        print(f"Admin {current_user.username} creating/updating product: {product.name}")
         
-        result_product = await create_or_update_product(db, product)
+        result_product = await crud.create_or_update_product(db, product)
         if not result_product:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -420,10 +389,8 @@ async def create_or_update_product_endpoint(
             )
         await db.commit()
         
-        # Получаем продукт с полными связями
-        full_product = await get_product_by_id_with_relations(db, result_product.id)
+        full_product = await crud.get_product_by_id_with_relations(db, result_product.id)
         
-        # Добавляем main_image
         if hasattr(full_product, 'product_images') and full_product.product_images:
             main_img = next((img for img in full_product.product_images if getattr(img, 'is_main', False)), None)
             full_product.main_image = main_img.url if main_img else full_product.product_images[0].url
@@ -498,7 +465,7 @@ async def toggle_product_status_endpoint(
         # Логируем действие
         print(f"Admin {current_user.username} toggling product {product_id} status")
         
-        product = await toggle_product_status(db, product_id)
+        product = await crud.toggle_product_status(db, product_id)
         if not product:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
@@ -534,7 +501,7 @@ async def update_product_full(
     
     try:
         # Проверяем существование продукта
-        existing_product = await get_product_by_id_with_relations(db, product_id)
+        existing_product = await crud.get_product_by_id_with_relations(db, product_id)
         if not existing_product:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
@@ -544,7 +511,7 @@ async def update_product_full(
         # Логируем действие админа
         print(f"Admin {current_user.username} updating product {product_id} ('{existing_product.name}')")
         
-        updated_product = await update_product_with_relations(db, product_id, product_data)
+        updated_product = await crud.update_product_with_relations(db, product_id, product_data)
         if not updated_product:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -612,7 +579,7 @@ async def batch_update_products(
         for product_id in batch_data.product_ids:
             try:
                 # Проверяем существование продукта
-                existing_product = await get_product_by_id_with_relations(db, product_id)
+                existing_product = await crud.get_product_by_id_with_relations(db, product_id)
                 if not existing_product:
                     failed_products.append({
                         "product_id": product_id,
@@ -622,7 +589,7 @@ async def batch_update_products(
                     continue
                 
                 # Обновляем продукт
-                updated_product = await update_product_with_relations(db, product_id, batch_data.update_data)
+                updated_product = await crud.update_product_with_relations(db, product_id, batch_data.update_data)
                 if updated_product:
                     updated_products.append(product_id)
                     success_count += 1
@@ -729,117 +696,36 @@ async def bulk_update_prices(
     db: AsyncSession = Depends(get_db),
     current_user: AdminUser = Depends(get_current_active_admin),
 ):
-    """
-    Массовое изменение цен товаров
-    """
     try:
-        # Проверяем права доступа
-        if not current_user.is_superuser and not current_user.has_permission("edit_products"):
+        # УБИРАЕМ проблемную проверку has_permission
+        if not current_user.is_superuser:
             raise HTTPException(status_code=403, detail="Недостаточно прав")
+        
+        print(f"🔍 Received bulk price update request: {request}")
+        print(f"🔍 Request data: scope={request.scope}, price_type={request.price_type}")
 
-        # Строим базовый запрос
-        query = select(Product).options(selectinload(Product.categories))
-        conditions = []
-        
-        # Применяем фильтры по области
-        if request.scope == "brand" and request.scope_id:
-            query = query.filter(Product.brand_id == request.scope_id)
-        elif request.scope == "category" and request.scope_id:
-            query = query.join(Product.categories).filter(Category.id == request.scope_id)
-        elif request.scope == "catalog" and request.scope_id:
-            query = query.filter(Product.catalog_id == request.scope_id)
-        
-        # Дополнительные фильтры
-        if request.only_active:
-            query = query.filter(Product.is_active == True)
-        
-        if request.only_in_stock:
-            query = query.filter(Product.in_stock == True)
-            
-        # Фильтр по диапазону цен
-        if request.price_range:
-            if request.price_range.get("from"):
-                query = query.filter(Product.price >= request.price_range["from"])
-            if request.price_range.get("to"):
-                query = query.filter(Product.price <= request.price_range["to"])
-        
-        if conditions:
-            query = query.where(and_(*conditions))
-
-        # Получаем товары для обновления
-        result = await db.execute(query)
-        products = result.scalars().all()
-        
-        updated_products = []
-        failed_products = []
-        total_price_change = 0.0
-        
-        for product in products:
-            try:
-                old_prices = {
-                    'main': float(product.price) if product.price else 0,
-                    'discount': float(product.discount_price) if product.discount_price else 0 
-                }
-                
-                # Вычисляем новые цены
-                new_prices = calculate_new_prices(
-                    product, 
-                    request.change_type, 
-                    request.change_value, 
-                    request.direction,
-                    request.price_type
-                )
-                
-                # Проверяем валидность новых цен
-                if not validate_prices(new_prices):
-                    failed_products.append({
-                        "product_id": product.id,
-                        "error": "Некорректная цена после изменения"
-                    })
-                    continue
-                
-                # Обновляем цены
-                if request.price_type in ['main', 'both'] and new_prices.get('main') is not None:
-                    old_main = product.price
-                    product.price = new_prices['main']
-                    if old_main:
-                        total_price_change += float(new_prices['main'] - old_main)
-                
-                if request.price_type in ['discount', 'both'] and new_prices.get('discount') is not None:  # ИСПРАВЛЕНО
-                    old_discount = product.discount_price or 0  # ИСПРАВЛЕНО
-                    product.discount_price = new_prices['discount']  # ИСПРАВЛЕНО
-                    if old_discount:
-                        total_price_change += float(new_prices['discount'] - old_discount)  # ИСПРАВЛЕНО
-                
-                # Обновляем время изменения
-                from datetime import datetime
-                product.updated_at = datetime.utcnow()
-                
-                updated_products.append(product.id)
-                
-            except Exception as e:
-                failed_products.append({
-                    "product_id": product.id,
-                    "error": str(e)
-                })
-        
-        await db.commit()
-        
-        # Логируем операцию
-        print(f"Bulk price update by {current_user.username}: {len(updated_products)} success, {len(failed_products)} failed")
-        
-        return PriceUpdateResponse(
-            success_count=len(updated_products),
-            failed_count=len(failed_products),
-            updated_products=updated_products,
-            failed_products=failed_products,
-            total_price_change=total_price_change
+        result = await crud.bulk_update_product_prices(
+            db=db,
+            scope=request.scope,
+            scope_id=request.scope_id,
+            price_type=request.price_type,
+            change_type=request.change_type,
+            change_value=request.change_value,
+            direction=request.direction,
+            only_active=request.only_active,
+            only_in_stock=request.only_in_stock,
+            price_range=request.price_range
         )
-        
+
+        print(f"Bulk price update by {current_user.username}: {result.success_count} success, {result.failed_count} failed")
+        return result
+
+    except HTTPException:
+        raise
     except Exception as e:
-        db.rollback()
         print(f"ERROR in bulk_update_prices: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Ошибка при обновлении цен: {str(e)}")
+
 
 @router.post("/count-for-price-update")
 async def get_products_count_for_price_update(
@@ -851,10 +737,6 @@ async def get_products_count_for_price_update(
     Получение количества товаров для оценки изменений - ИСПРАВЛЕННАЯ ВЕРСИЯ
     """
     try:
-        # ИСПРАВЛЕНИЕ: Используем async SQLAlchemy
-        from sqlalchemy import select, and_, func
-        
-        # Строим запрос аналогично основной функции
         query = select(func.count(Product.id))
         conditions = []
         
@@ -877,11 +759,9 @@ async def get_products_count_for_price_update(
             if request.price_range.get("to"):
                 conditions.append(Product.price <= request.price_range["to"])
         
-        # Применяем условия
         if conditions:
             query = query.where(and_(*conditions))
         
-        # ИСПРАВЛЕНИЕ: Асинхронное выполнение
         result = await db.execute(query)
         count = result.scalar()
         
@@ -890,33 +770,32 @@ async def get_products_count_for_price_update(
     except Exception as e:
         print(f"ERROR in get_products_count_for_price_update: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Ошибка при подсчете товаров: {str(e)}")
-# ========== DELETE эндпоинты (удаление - ТОЛЬКО ДЛЯ СУПЕРАДМИНА) ==========
+    
+
 
 @router.delete("/{product_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_product_endpoint(
-    request: Request,  # Добавляем Request
+    request: Request, 
     product_id: int,
-    current_user: AdminUser = Depends(get_current_superuser),  # ТОЛЬКО СУПЕРАДМИН!
+    current_user: AdminUser = Depends(get_current_superuser),  
     db: AsyncSession = Depends(get_db)
 ):
     """
     Полное удаление продукта (только для суперадмина)
     """
-    check_admin_rate_limit(request, max_requests=10, window_minutes=1)  # Строгий лимит для удаления
+    check_admin_rate_limit(request, max_requests=10, window_minutes=1) 
     
     try:
-        # Получаем продукт для логирования
-        existing_product = await get_product_by_id_with_relations(db, product_id)
+        existing_product = await crud.get_product_by_id_with_relations(db, product_id)
         if not existing_product:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"Продукт с ID {product_id} не найден"
             )
         
-        # Критическое действие - подробное логирование
         print(f"CRITICAL: Superuser {current_user.username} deleting product {product_id} ('{existing_product.name}')")
         
-        success = await delete_product(db, product_id)
+        success = await crud.delete_product(db, product_id)
         if not success:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
@@ -939,31 +818,29 @@ async def delete_product_endpoint(
             detail=f"Ошибка при удалении продукта: {str(e)}"
         )
 
-@router.delete("/{product_id}/soft", response_model=ProductResponse)
+@router.delete(
+        "/{product_id}/soft", 
+        response_model=ProductResponse
+        )
 async def soft_delete_product_endpoint(
     request: Request,  # Добавляем Request
     product_id: int,
     current_user: AdminUser = Depends(get_current_active_admin),  # Для всех админов
     db: AsyncSession = Depends(get_db)
 ):
-    """
-    Мягкое удаление продукта (установка is_active = False)
-    """
     check_admin_rate_limit(request, max_requests=30, window_minutes=1)  # Rate limiting
     
     try:
-        # Получаем продукт для логирования
-        existing_product = await get_product_by_id_with_relations(db, product_id)
+        existing_product = await crud.get_product_by_id_with_relations(db, product_id)
         if not existing_product:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"Продукт с ID {product_id} не найден"
             )
         
-        # Логируем мягкое удаление
         print(f"Admin {current_user.username} soft deleting product {product_id} ('{existing_product.name}')")
         
-        product = await soft_delete_product(db, product_id)
+        product = await crud.soft_delete_product(db, product_id)
         if not product:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,

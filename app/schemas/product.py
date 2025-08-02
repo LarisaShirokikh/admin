@@ -165,15 +165,18 @@ class BatchUpdateResponse(BaseModel):
         from_attributes = True
 
 class PriceUpdateRequest(BaseModel):
-    scope: str = Field(..., description="Область применения: all, brand, category, catalog")
-    scope_id: Optional[int] = Field(None, description="ID элемента для фильтрации")
-    price_type: str = Field(..., description="Тип цены: main, discount, both")
-    change_type: str = Field(..., description="Тип изменения: percent, fixed")
-    change_value: float = Field(..., gt=0, description="Значение изменения")
-    direction: str = Field(..., description="Направление: increase, decrease")
-    only_active: Optional[bool] = Field(True, description="Только активные товары")
-    only_in_stock: Optional[bool] = Field(False, description="Только товары в наличии")
-    price_range: Optional[Dict[str, Optional[float]]] = Field(None, description="Диапазон цен")
+    scope: str
+    scope_id: Optional[int] = None
+    price_type: str 
+    change_type: str  
+    change_value: float 
+    direction: str
+    only_active: Optional[bool]  
+    only_in_stock: Optional[bool] 
+    price_range: Optional[Dict[str, Optional[float]]]  
+
+    class Config:
+        from_attributes = True
 
 class PriceUpdateResponse(BaseModel):
     success_count: int

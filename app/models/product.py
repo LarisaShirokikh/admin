@@ -11,18 +11,18 @@ class Product(Base):
     __tablename__ = "products"
 
     id = Column(Integer, primary_key=True, index=True)
-    uuid = Column(String(36), default=lambda: str(uuid.uuid4()), unique=True, index=True)  # Добавлено в админку
+    uuid = Column(String(36), default=lambda: str(uuid.uuid4()), unique=True, index=True) 
     name = Column(String(255), nullable=False)
-    slug = Column(String(255), nullable=False, unique=True, index=True)  # Добавлено в админку
+    slug = Column(String(255), nullable=False, unique=True, index=True)
     description = Column(Text, nullable=True)
     price = Column(Float, nullable=False, default=0)
-    discount_price = Column(Float, nullable=True)  # Добавлено в админку
-    brand_id = Column(Integer, ForeignKey('brands.id', ondelete='SET NULL'), nullable=True)  # Добавлено в админку
-    catalog_id = Column(Integer, ForeignKey("catalogs.id"), nullable=False)  # Оставлено из админки
+    discount_price = Column(Float, nullable=True) 
+    brand_id = Column(Integer, ForeignKey('brands.id', ondelete='SET NULL'), nullable=True)
+    catalog_id = Column(Integer, ForeignKey("catalogs.id"), nullable=False) 
     in_stock = Column(Boolean, default=True)
     
-    # Дополнительные поля из бэкенда
-    type = Column(String(100), nullable=True, index=True)  # Добавлено в админку
+   
+    type = Column(String(100), nullable=True, index=True)
     is_active = Column(Boolean, default=True)  # Добавлено в админку
     is_new = Column(Boolean, default=False)  # Добавлено в админку
     popularity_score = Column(Float, default=0)  # Добавлено в админку

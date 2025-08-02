@@ -1,3 +1,4 @@
+import datetime
 from decimal import Decimal
 import json
 import logging
@@ -10,51 +11,28 @@ from app.models import Product, ProductImage
 from app.models.catalog import Catalog
 from app.models.category import Category
 from app.models.brand import Brand
-from app.schemas.product import ProductCreate, ProductUpdate
+from app.schemas.product import PriceUpdateResponse, ProductCreate, ProductUpdate
 from app.schemas.product_image import ProductImageCreate
 from app.utils.text_utils import generate_slug
 from sqlalchemy.orm import selectinload
 
 logger = logging.getLogger("crud_product")
 
-# ---------------------- Вспомогательные функции ----------------------
 
 def calculate_product_prices(original_price: float) -> Tuple[float, float]:
-    """
-    Рассчитывает цены продукта на основе исходной цены.
-    
-    Args:
-        original_price: Исходная цена продукта
-        
-    Returns:
-        Tuple[float, float]: (price, discount_price), где:
-        - price - полная цена (+20% к исходной, округленная)
-        - discount_price - исходная цена
-    """
     discount_price = float(original_price)
     # Увеличиваем на 20% и округляем до целого числа
     price = round(discount_price * 1.2)
     return price, discount_price
 
 async def find_or_create_catalog(db: AsyncSession, catalog_name: str, images=None):
-    """
-    Находит или создает каталог по имени.
-    Полностью обновляет все поля, если каталог уже существует.
-    Обрабатывает случаи с дубликатами и конфликтами slug.
-    """
     original_slug = generate_slug(catalog_name)
     
-    # Шаг 1: Проверяем, существует ли уже каталог с таким slug
     slug_check = await db.execute(select(Catalog).where(Catalog.slug == original_slug))
     existing_by_slug = slug_check.scalar_one_or_none()
-    
-    # Шаг 2: Ищем каталоги по имени
     result = await db.execute(select(Catalog).where(Catalog.name == catalog_name))
     catalogs_by_name = result.scalars().all()
-    
-    # Если нашли каталог по имени и по slug - и это один и тот же каталог
     if existing_by_slug and catalogs_by_name and existing_by_slug.id == catalogs_by_name[0].id:
-        # Безопасное обновление: слаг не меняется так как он совпадает
         catalog = existing_by_slug
         catalog.name = catalog_name  # Обновляем имя (на всякий случай)
         catalog.is_active = True
@@ -148,15 +126,6 @@ async def find_or_create_catalog(db: AsyncSession, catalog_name: str, images=Non
     return catalog
 
 async def format_catalog_name(catalog_name: str) -> str:
-    """
-    Форматирует имя каталога согласно правилам.
-    
-    Args:
-        catalog_name: Исходное имя каталога
-        
-    Returns:
-        str: Отформатированное имя каталога
-    """
     if "Лабиринт" not in catalog_name:
         # Получаем последнее слово из URL
         url_parts = catalog_name.split('/')
@@ -166,15 +135,7 @@ async def format_catalog_name(catalog_name: str) -> str:
     return catalog_name
 
 async def generate_product_slug(product_name: str) -> str:
-    """
-    Генерирует slug для продукта на основе его имени.
     
-    Args:
-        product_name: Имя продукта
-        
-    Returns:
-        str: Сгенерированный slug
-    """
     product_slug = re.sub(r'[^a-zA-Z0-9]', '-', product_name.lower())
     product_slug = re.sub(r'-+', '-', product_slug).strip('-')
     return product_slug
@@ -1230,11 +1191,8 @@ async def get_all_products_filtered_with_relations(
     price_from: Optional[float] = None,
     price_to: Optional[float] = None,
 ) -> List[Product]:
-    """
-    Получить отфильтрованный список продуктов с подгрузкой связанных объектов.
-    """
+    
     try:
-        # Используем функцию с пагинацией, но без ограничений
         products, _ = await get_products_paginated_with_relations(
             db=db,
             skip=0,
@@ -1264,10 +1222,6 @@ def add_main_image_to_product(product: Product) -> None:
         product.main_image = None
 
 async def get_all_products_with_relations(db: AsyncSession) -> List[Product]:
-    """
-    Получить все продукты с подгрузкой связанных объектов.
-    ВНИМАНИЕ: Может быть медленной на больших объемах данных!
-    """
     try:
         stmt = select(Product).options(
             selectinload(Product.brand),
@@ -1326,8 +1280,181 @@ def validate_prices(prices: dict) -> bool:
     return True
 
 def log_bulk_price_update(user_id: int, request_data: dict, success_count: int, failed_count: int):
-    """
-    Логирование операции массового изменения цен
-    """
-    # Здесь можно добавить логирование в БД или файл
     pass
+
+async def bulk_update_product_prices(
+    db: AsyncSession,
+    scope: str,
+    scope_id: Optional[int],
+    price_type: str,
+    change_type: str,
+    change_value: float,
+    direction: str,
+    only_active: Optional[bool] = True,
+    only_in_stock: Optional[bool] = False,
+    price_range: Optional[Dict[str, Optional[float]]] = None
+) -> PriceUpdateResponse:
+    """
+    Массовое обновление цен продуктов
+    """
+    try:
+        print(f"🔄 Starting bulk price update: scope={scope}, price_type={price_type}, change_type={change_type}")
+        
+        # Строим базовый запрос
+        query = select(Product)
+        conditions = []
+        
+        # Применяем фильтры по области
+        if scope == "brand" and scope_id:
+            conditions.append(Product.brand_id == scope_id)
+        elif scope == "category" and scope_id:
+            # Для категорий используем JOIN с product_categories
+            query = query.join(Product.categories).where(Category.id == scope_id)
+        elif scope == "catalog" and scope_id:
+            conditions.append(Product.catalog_id == scope_id)
+        # scope == "all" - без дополнительных условий
+        
+        # Дополнительные фильтры
+        if only_active:
+            conditions.append(Product.is_active == True)
+        if only_in_stock:
+            conditions.append(Product.in_stock == True)
+            
+        # Фильтр по диапазону цен
+        if price_range:
+            if price_range.get("from"):
+                conditions.append(Product.price >= price_range["from"])
+            if price_range.get("to"):
+                conditions.append(Product.price <= price_range["to"])
+        
+        # Применяем условия
+        if conditions:
+            query = query.where(and_(*conditions))
+        
+        # Получаем продукты для обновления
+        result = await db.execute(query)
+        products = result.scalars().all()
+        
+        if not products:
+            print("❌ No products found for update")
+            return PriceUpdateResponse(
+                success_count=0,
+                failed_count=0,
+                updated_products=[],
+                failed_products=[],
+                total_price_change=0.0
+            )
+        
+        print(f"📦 Found {len(products)} products for update")
+        
+        # Счетчики и результаты
+        success_count = 0
+        failed_count = 0
+        updated_products = []
+        failed_products = []
+        total_price_change = 0.0
+        
+        # Обрабатываем каждый продукт
+        for product in products:
+            try:
+                old_price = product.price
+                old_discount_price = product.discount_price
+                
+                # Вычисляем новые цены
+                if price_type == "main":
+                    # Обновляем только основную цену
+                    new_price = calculate_new_price(old_price, change_type, change_value, direction)
+                    product.price = new_price
+                    price_change = new_price - old_price
+                    
+                elif price_type == "discount":
+                    # Обновляем только цену со скидкой (если есть)
+                    if old_discount_price and old_discount_price > 0:
+                        new_discount_price = calculate_new_price(old_discount_price, change_type, change_value, direction)
+                        product.discount_price = new_discount_price
+                        price_change = new_discount_price - old_discount_price
+                    else:
+                        # Если скидочной цены нет, создаем её на основе основной цены
+                        new_discount_price = calculate_new_price(old_price, change_type, change_value, direction)
+                        product.discount_price = new_discount_price
+                        price_change = new_discount_price - old_price
+                        
+                elif price_type == "both":
+                    # ИСПРАВЛЕНО: Обновляем ОБЕ цены пропорционально
+                    new_price = calculate_new_price(old_price, change_type, change_value, direction)
+                    product.price = new_price
+                    price_change = new_price - old_price
+                    
+                    # Если есть скидочная цена, обновляем и её
+                    if old_discount_price and old_discount_price > 0:
+                        new_discount_price = calculate_new_price(old_discount_price, change_type, change_value, direction)
+                        product.discount_price = new_discount_price
+                        price_change += new_discount_price - old_discount_price
+                    else:
+                        # Если скидочной цены не было, не создаем её при "both"
+                        pass
+                
+                else:
+                    raise ValueError(f"Неизвестный тип цены: {price_type}")
+                
+                # Валидация новых цен
+                if product.price <= 0:
+                    raise ValueError("Цена не может быть отрицательной или нулевой")
+                if product.discount_price and product.discount_price <= 0:
+                    product.discount_price = None  # Убираем некорректную скидочную цену
+                
+                # Обновляем время изменения
+                product.updated_at = datetime.utcnow()
+                
+                # Добавляем к успешным
+                updated_products.append(product.id)
+                total_price_change += price_change
+                success_count += 1
+                
+                print(f"✅ Product {product.id}: {old_price}₽ → {product.price}₽" + 
+                      (f", discount: {old_discount_price}₽ → {product.discount_price}₽" if product.discount_price else ""))
+                
+            except Exception as e:
+                print(f"❌ Error updating product {product.id}: {str(e)}")
+                failed_products.append({
+                    "product_id": product.id,
+                    "error": str(e),
+                    "product_name": product.name
+                })
+                failed_count += 1
+                continue
+        
+        # Сохраняем изменения
+        await db.commit()
+        
+        print(f"✅ Bulk update completed: {success_count} success, {failed_count} failed")
+        
+        return PriceUpdateResponse(
+            success_count=success_count,
+            failed_count=failed_count,
+            updated_products=updated_products,
+            failed_products=failed_products,
+            total_price_change=round(total_price_change, 2)
+        )
+        
+    except Exception as e:
+        await db.rollback()
+        print(f"💥 Bulk update failed: {str(e)}")
+        raise e
+
+
+def calculate_new_price(old_price: float, change_type: str, change_value: float, direction: str) -> float:
+    
+    if change_type == "percent":
+        if direction == "increase":
+            new_price = old_price * (1 + change_value / 100)
+        else:  # decrease
+            new_price = old_price * (1 - change_value / 100)
+    else:  # fixed
+        if direction == "increase":
+            new_price = old_price + change_value
+        else:  # decrease
+            new_price = old_price - change_value
+    
+    
+    return round(new_price)
