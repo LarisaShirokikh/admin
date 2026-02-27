@@ -1067,16 +1067,6 @@ async def get_products_paginated_with_relations(
     return products, total_count
 
 async def toggle_product_status(db: AsyncSession, product_id: int) -> Optional[Product]:
-    """
-    Переключить статус активности продукта.
-    
-    Args:
-        db: Сессия базы данных
-        product_id: ID продукта
-        
-    Returns:
-        Optional[Product]: Обновленный продукт или None, если не найден
-    """
     try:
         product = await get_product_by_id(db, product_id)
         if not product:

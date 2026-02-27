@@ -23,25 +23,25 @@ class Product(Base):
     
    
     type = Column(String(100), nullable=True, index=True)
-    is_active = Column(Boolean, default=True)  # Добавлено в админку
-    is_new = Column(Boolean, default=False)  # Добавлено в админку
-    popularity_score = Column(Float, default=0)  # Добавлено в админку
-    rating = Column(Float, default=0)  # Добавлено в админку
-    review_count = Column(Integer, default=0)  # Добавлено в админку
+    is_active = Column(Boolean, default=True)
+    is_new = Column(Boolean, default=False)
+    popularity_score = Column(Float, default=0)
+    rating = Column(Float, default=0)
+    review_count = Column(Integer, default=0)
     attributes = Column(JSON, default=dict)  
-    meta_title = Column(String(255), nullable=True)  # Добавлено в админку
-    meta_description = Column(String(500), nullable=True)  # Добавлено в админку
-    meta_keywords = Column(String(255), nullable=True)  # Добавлено в админку
-    created_at = Column(DateTime(timezone=True), server_default=func.now())  # Добавлено в админку
-    updated_at = Column(DateTime(timezone=True), onupdate=func.now())  # Добавлено в админку
+    meta_title = Column(String(255), nullable=True)
+    meta_description = Column(String(500), nullable=True)
+    meta_keywords = Column(String(255), nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
 
     category_id = Column(Integer, ForeignKey("categories.id"), nullable=True)
 
     # Связи
     catalog = relationship("Catalog", back_populates="products")
     categories = relationship("Category", secondary=product_categories, back_populates="products")
-    brand = relationship("Brand", back_populates="products")  # Добавлено в админку
-    reviews = relationship("Review", back_populates="product", cascade="all, delete-orphan")  # Добавлено в админку
+    brand = relationship("Brand", back_populates="products")
+    reviews = relationship("Review", back_populates="product", cascade="all, delete-orphan")
     product_images = relationship("ProductImage", back_populates="product", cascade="all, delete-orphan")
     product_video_items = relationship("ProductVideo", back_populates="product")
     videos = relationship("Video", back_populates="product", cascade="all, delete-orphan")

@@ -24,7 +24,6 @@ class YandexUserInfo(BaseModel):
 
 
 class OAuthCallbackData(BaseModel):
-    """Данные от OAuth провайдера"""
     code: str
     state: Optional[str] = None
 
@@ -32,7 +31,6 @@ class OAuthCallbackData(BaseModel):
 # === Схемы для авторизации ===
 
 class UserResponse(BaseModel):
-    """Схема ответа с информацией о пользователе"""
     id: int
     email: str
     full_name: Optional[str] = None
@@ -48,13 +46,11 @@ class UserResponse(BaseModel):
 
 
 class CurrentUser(UserResponse):
-    """Схема для текущего авторизованного пользователя"""
     yandex_id: Optional[str] = None
     oauth_provider: Optional[str] = None
 
 
 class AuthStatus(BaseModel):
-    """Статус авторизации"""
     is_authenticated: bool
     user: Optional[UserResponse] = None
 

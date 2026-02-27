@@ -35,9 +35,6 @@ async def get_current_admin_user(
     credentials: HTTPAuthorizationCredentials = Depends(security),
     db: AsyncSession = Depends(get_db)
 ) -> AdminUser:
-    """
-    Получение текущего админ-пользователя по JWT токену
-    """
     token = credentials.credentials
     
     try:
@@ -77,9 +74,6 @@ async def get_current_admin_user(
 async def get_current_active_admin(
     current_user: AdminUser = Depends(get_current_admin_user)
 ) -> AdminUser:
-    """
-    Проверка что админ активен (дополнительная проверка)
-    """
     if not admin_user.is_active(current_user):
         raise AdminAuthException("Inactive user")
     return current_user
@@ -87,16 +81,9 @@ async def get_current_active_admin(
 async def get_current_superuser(
     current_user: AdminUser = Depends(get_current_active_admin)
 ) -> AdminUser:
-    """
-    Проверка что пользователь суперадмин
-    """
     if not admin_user.is_superuser(current_user):
         raise AdminPermissionException("Not enough permissions. Superuser required.")
     return current_user
-
-# Rate limiting для админки (простая реализация)
-from collections import defaultdict
-from datetime import timedelta
 
 admin_rate_limits = defaultdict(list)
 

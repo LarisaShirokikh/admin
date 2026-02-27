@@ -118,7 +118,7 @@ class PostsCRUD:
         # Пагинация
         stmt = stmt.offset(skip).limit(limit)
         result = await self.db.execute(stmt)
-        posts = result.scalars().all()
+        posts = result.unique().scalars().all()
         
         # Добавляем featured_media для каждого поста
         for post in posts:
@@ -182,7 +182,7 @@ class PostsCRUD:
         )
         
         result = await self.db.execute(stmt)
-        posts = result.scalars().all()
+        posts = result.unique().scalars().all()
         
         # Добавляем featured_media для каждого поста
         for post in posts:
@@ -205,7 +205,7 @@ class PostsCRUD:
         )
         
         result = await self.db.execute(stmt)
-        posts = result.scalars().all()
+        posts = result.unique().scalars().all()
         
         # Добавляем featured_media для каждого поста
         for post in posts:
@@ -227,7 +227,7 @@ class PostsCRUD:
         )
         
         result = await self.db.execute(stmt)
-        posts = result.scalars().all()
+        posts = result.unique().scalars().all()
         
         # Добавляем featured_media для каждого поста
         for post in posts:
@@ -250,7 +250,7 @@ class PostsCRUD:
         )
         
         result = await self.db.execute(stmt)
-        posts = result.scalars().all()
+        posts = result.unique().scalars().all()
         
         # Добавляем featured_media для каждого поста
         for post in posts:
@@ -286,7 +286,7 @@ class PostsCRUD:
             if post_data.tag_ids:
                 stmt = select(PostTag).filter(PostTag.id.in_(post_data.tag_ids))
                 result = await self.db.execute(stmt)
-                tags = result.scalars().all()
+                tags = result.unique().scalars().all()
                 post.tags = tags
 
             await self.db.commit()
@@ -321,7 +321,7 @@ class PostsCRUD:
             if tag_ids is not None:
                 stmt = select(PostTag).filter(PostTag.id.in_(tag_ids))
                 result = await self.db.execute(stmt)
-                tags = result.scalars().all()
+                tags = result.unique().scalars().all()
                 post.tags = tags
 
             # Устанавливаем дату публикации
@@ -362,7 +362,7 @@ class PostsCRUD:
         )
         
         result = await self.db.execute(stmt)
-        return result.scalars().all()
+        return result.unique().scalars().all()
 
     async def get_tag_by_slug(self, slug: str) -> Optional[PostTag]:
         """Получить тег по slug"""
@@ -434,7 +434,7 @@ class PostsCRUD:
         )
         
         result = await self.db.execute(stmt)
-        return result.scalars().all()
+        return result.unique().scalars().all()
 
     # === STATISTICS ===
 

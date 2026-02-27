@@ -144,7 +144,6 @@ class PostView(Base):
 
 
 class PostLike(Base):
-    """Модель лайков постов"""
     __tablename__ = "post_likes"
 
     id = Column(Integer, primary_key=True, index=True)

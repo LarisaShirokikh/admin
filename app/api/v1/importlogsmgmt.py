@@ -4,7 +4,7 @@ from typing import List
 
 from app.schemas.import_log import ImportLogRead
 from app.models.import_log import ImportLog
-from app.deps import get_db
+from app.core.dependencies import get_db
 from sqlalchemy import select
 
 router = APIRouter()

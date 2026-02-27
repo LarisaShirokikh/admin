@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy.orm import Session
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.deps.database import get_db
+from app.core.dependencies import get_db
 from app.crud.posts import get_posts_crud, PostsCRUD
 from app.schemas.posts import (
     Post, PostListItem, PostListResponse, PostSearchParams,
@@ -127,7 +127,6 @@ async def get_post_by_slug(
     slug: str,
     db: AsyncSession = Depends(get_db)
 ):
-    """Получить пост по slug"""
     crud = get_posts_crud(db)
     post = await crud.get_post_by_slug(slug)
     

@@ -1,49 +1,48 @@
 from collections import defaultdict
-from typing import List, Dict
-from pydantic import Field, field_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from typing import Dict
 
-# Глобальный счетчик активных задач скрапинга - выносим за пределы класса
 active_scraping_tasks: Dict[str, int] = defaultdict(int)
 
+from pydantic import Field
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
 class Settings(BaseSettings):
-    database_url: str
-    redis_url: str
-    SECRET_KEY: str = Field(..., env="SECRET_KEY") 
-    
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
-    # Константы для лимитов
+    # Database
+    database_url: str
+    redis_url: str
+
+    # Security
+    SECRET_KEY: str
+    JWT_SECRET: str = "your-temp-secret-key-change-this"
+    ALGORITHM: str = "HS256"
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = 120
+    REFRESH_TOKEN_EXPIRE_HOURS: int = 168
+
+    # Session
+    SESSION_EXPIRE_HOURS: int = 24
+
+    # Default superadmin
+    ADMIN_USERNAME: str = "dverin"
+    ADMIN_EMAIL: str = "admin@dverin.pro"
+    ADMIN_PASSWORD: str = "dverin"
+
+    # Scraping limits
     MAX_CONCURRENT_TASKS_PER_USER: int = 2
     MAX_CONCURRENT_TASKS_GLOBAL: int = 5
 
-    # === OAuth Yandex настройки ===
-    YANDEX_CLIENT_ID: str = Field(..., env="YANDEX_CLIENT_ID")
-    YANDEX_CLIENT_SECRET: str = Field(..., env="YANDEX_CLIENT_SECRET")
-    YANDEX_REDIRECT_URI: str = Field(default="http://localhost:8000/api/v1/auth/yandex/callback", env="YANDEX_REDIRECT_URI")
+    UPLOAD_DIR: str = "/app/media"
+    ALLOWED_IMAGE_EXTENSIONS: list = [".png", ".jpg", ".jpeg", ".gif", ".webp"]
+    MAX_IMAGE_SIZE: int = 10 * 1024 * 1024
 
-    # URLs для OAuth
-    YANDEX_AUTH_URL: str = "https://oauth.yandex.ru/authorize"
-    YANDEX_TOKEN_URL: str = "https://oauth.yandex.ru/token"
-    YANDEX_USER_INFO_URL: str = "https://login.yandex.ru/info"
-    YANDEX_SCOPE: str = "login:email login:info"
+    # Video
+    ALLOWED_VIDEO_EXTENSIONS: list = [".mp4", ".mov", ".avi", ".mkv", ".webm"]
+    MAX_VIDEO_SIZE: int = 100 * 1024 * 1024  # 100MB
+    MAX_UPLOADS_PER_USER: int = 5
+    MAX_UPLOADS_GLOBAL: int = 20
 
-    # Время жизни токенов
-    SESSION_EXPIRE_HOURS: int = Field(default=24, env="SESSION_EXPIRE_HOURS")
-    REFRESH_TOKEN_EXPIRE_DAYS: int = Field(default=30, env="REFRESH_TOKEN_EXPIRE_DAYS")
-
-    # Администраторы по умолчанию (Yandex ID)
-    DEFAULT_ADMIN_YANDEX_IDS: List[str] = Field(default=[], env="DEFAULT_ADMIN_YANDEX_IDS")
-
-    @field_validator('DEFAULT_ADMIN_YANDEX_IDS', mode='before')
-    @classmethod
-    def parse_admin_ids(cls, v):
-        if isinstance(v, str):
-            return [id_.strip() for id_ in v.split(',') if id_.strip()]
-        elif isinstance(v, (int, float)):
-            return [str(v)]  # Преобразуем число в строку и возвращаем как список
-        elif isinstance(v, list):
-            return [str(item) for item in v]  # Преобразуем все элементы в строки
-        return v or []
 
 settings = Settings()
+
