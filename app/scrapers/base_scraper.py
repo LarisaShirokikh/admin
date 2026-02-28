@@ -1,830 +1,706 @@
 """
-Базовый модуль с общими компонентами для всех скраперов
-Работает только с существующими категориями из БД, не создает новые
+Базовый скрапер с полной синхронизацией продуктов:
+  - Добавление новых
+  - Обновление существующих
+  - Деактивация отсутствующих на сайте-доноре
+  - Скачивание и локальное хранение изображений
 """
+
 import logging
 import re
-import json
-from typing import List, Dict, Any, Optional, Set, Tuple
-from bs4 import BeautifulSoup
+import time
+from typing import Dict, List, Optional, Set, Tuple
+
 import requests
-from sqlalchemy import func, insert, or_, select, delete
+from bs4 import BeautifulSoup
+from sqlalchemy import delete, func, insert, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.scrapers.door_synonyms import DOOR_PATTERNS, DOOR_SYNONYMS, MORPHOLOGY_VARIANTS
-from app.utils.text_utils import generate_slug
+from app.models.attributes import product_categories
+from app.models.brand import Brand
 from app.models.catalog import Catalog
 from app.models.category import Category
-from app.models.brand import Brand
 from app.models.product import Product
-from app.schemas.product import ProductCreate
+from app.models.product_image import ProductImage
 from app.schemas.product_image import ProductImageCreate
-from app.models.attributes import product_categories
+from app.services.image_service import ImageService
+from app.scrapers.door_synonyms import DOOR_PATTERNS, DOOR_SYNONYMS, MORPHOLOGY_VARIANTS
+from app.utils.text_utils import generate_slug
 
-# Базовый класс для скраперов
+
 class BaseScraper:
-    def __init__(self, 
-                 brand_name: str, 
-                 brand_slug: str, 
-                 base_url: str,
-                 logger_name: str = "base_scraper"):
-        """
-        Инициализирует базовый скрапер
-        
-        Args:
-            brand_name: Название бренда
-            brand_slug: Slug бренда
-            base_url: Базовый URL сайта
-            logger_name: Имя логгера
-        """
+    """Базовый класс для всех скраперов."""
+
+    def __init__(
+        self,
+        brand_name: str,
+        brand_slug: str,
+        base_url: str,
+        logger_name: str = "base_scraper",
+    ):
         self.brand_name = brand_name
         self.brand_slug = brand_slug
         self.base_url = base_url
         self.logger = logging.getLogger(logger_name)
         self.headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36"
+            )
         }
+        self._categories_cache: Optional[Dict] = None
 
-        # Кэш для категорий и их ключевых слов
-        self._categories_cache = None
-        self._category_patterns_cache = None
-        
-    # ---------- Методы работы с HTTP и HTML ----------
-    
-    def get_html_content(self, url: str, retry_count: int = 3) -> Optional[str]:
-        """
-        Получает HTML-контент страницы по URL с повторными попытками при ошибках
-        """
-        if not url.startswith('http'):
-            url = f"{self.base_url}{url}" if url.startswith('/') else f"{self.base_url}/{url}"
-            
-        for attempt in range(retry_count):
+    # ------------------------------------------------------------------ #
+    #  HTTP
+    # ------------------------------------------------------------------ #
+
+    def get_html(self, url: str, retries: int = 3) -> Optional[str]:
+        """Получает HTML страницы с повторными попытками."""
+        url = self._abs_url(url)
+        for attempt in range(retries):
             try:
-                self.logger.info(f"Запрос к URL (попытка {attempt+1}): {url}")
-                response = requests.get(url, headers=self.headers, timeout=15)
-                response.raise_for_status()
-                return response.text
-            except requests.exceptions.RequestException as e:
-                self.logger.warning(f"Ошибка при запросе к {url}: {e}")
-                if attempt < retry_count - 1:
-                    self.logger.info(f"Повторная попытка через {2 * (attempt + 1)} секунд...")
-                    import time
+                resp = requests.get(url, headers=self.headers, timeout=15)
+                resp.raise_for_status()
+                return resp.text
+            except requests.RequestException as e:
+                self.logger.warning("Попытка %d/%d — %s: %s", attempt + 1, retries, url, e)
+                if attempt < retries - 1:
                     time.sleep(2 * (attempt + 1))
-                else:
-                    self.logger.error(f"Не удалось получить контент после {retry_count} попыток")
-        
+        self.logger.error("Не удалось загрузить: %s", url)
         return None
-    
-    def normalize_url(self, url: str) -> str:
-        """Нормализует URL, добавляя базовый URL при необходимости"""
-        if not url.startswith('http'):
-            return f"{self.base_url}{url}" if url.startswith('/') else f"{self.base_url}/{url}"
-        return url
-    
-    # ---------- Методы работы с изображениями ----------
-    
-    def add_image_url_if_valid(self, image_urls: List[str], raw_url: str) -> None:
+
+    def _abs_url(self, url: str) -> str:
+        """Приводит URL к абсолютному."""
+        if url.startswith("http"):
+            return url
+        return f"{self.base_url}/{url.lstrip('/')}"
+
+    # ------------------------------------------------------------------ #
+    #  Изображения
+    # ------------------------------------------------------------------ #
+
+    def collect_image_urls(self, urls_found: List[str]) -> List[str]:
+        """Фильтрует и нормализует список URL изображений."""
+        valid_ext = (".jpg", ".jpeg", ".png", ".webp", ".gif")
+        seen: Set[str] = set()
+        result: List[str] = []
+
+        for raw in urls_found:
+            if not raw or "data:image/svg" in raw:
+                continue
+            url = self._abs_url(raw)
+            if not any(url.lower().endswith(ext) for ext in valid_ext):
+                continue
+            if url in seen:
+                continue
+            seen.add(url)
+            result.append(url)
+
+        return result
+
+    def download_product_images(
+        self,
+        product_id: int,
+        image_urls: List[str],
+    ) -> List[dict]:
         """
-        Проверяет и добавляет URL изображения в список, если он валидный
+        Скачивает все изображения продукта локально.
+
+        Returns:
+            Список dict: {url, original_url, is_local, is_main, file_size, download_error}
         """
-        valid_extensions = (".jpg", ".jpeg", ".png", ".webp", ".gif")
+        results = []
+        for i, url in enumerate(image_urls):
+            is_main = i == 0
+            stored = ImageService.download_and_store(
+                url=url,
+                product_id=product_id,
+                image_index=i,
+                is_main=is_main,
+            )
 
-        if not raw_url or "data:image/svg+xml" in raw_url:
-            return
+            if stored:
+                results.append({
+                    "url": stored["local_url"],
+                    "original_url": url,
+                    "is_local": True,
+                    "is_main": is_main,
+                    "file_size": stored["file_size"],
+                    "download_error": None,
+                })
+            else:
+                # Если не удалось скачать — сохраняем внешний URL как fallback
+                results.append({
+                    "url": url,
+                    "original_url": url,
+                    "is_local": False,
+                    "is_main": is_main,
+                    "file_size": None,
+                    "download_error": "Download or conversion failed",
+                })
 
-        # Проверяем, является ли URL абсолютным
-        full_url = raw_url
-        if not raw_url.startswith('http'):
-            clean_url = raw_url.lstrip('/')
-            full_url = f"{self.base_url}/{clean_url}"
+        return results
 
-        # Проверяем расширение файла
-        if not any(full_url.lower().endswith(ext) for ext in valid_extensions):
-            return
+    # ------------------------------------------------------------------ #
+    #  Текст и цены
+    # ------------------------------------------------------------------ #
 
-        if full_url in image_urls:
-            return
-
-        image_urls.append(full_url)
-        self.logger.info(f"Добавлено изображение: {full_url}")
-    
-    def create_image_objects(self, image_urls: List[str], main_image_url: Optional[str] = None) -> List[ProductImageCreate]:
-        """Создает объекты изображений, ставя основное изображение первым"""
-        if main_image_url and main_image_url in image_urls:
-            # Удаляем main_image_url из списка
-            image_urls.remove(main_image_url)
-            # Добавляем его в начало
-            image_urls.insert(0, main_image_url)
-        
-        return [ProductImageCreate(url=img, is_main=(i == 0)) for i, img in enumerate(image_urls)]
-    
-    # ---------- Методы работы с текстом ----------
-    
-    def extract_price_from_text(self, text: str) -> int:
-        """Извлекает цену из текста"""
+    @staticmethod
+    def extract_price(text: str) -> int:
+        """Извлекает цену из текстовой строки."""
         if not text:
             return 0
-        
-        matches = re.findall(r'(\d+[\s\d]*\d*)', text)
-        prices = [int(''.join(c for c in match if c.isdigit())) for match in matches if match]
+        nums = re.findall(r"(\d[\s\d]*\d*)", text)
+        prices = [int("".join(c for c in n if c.isdigit())) for n in nums if n]
         return max(prices) if prices else 0
-    
-    def create_meta_description(self, description: str, characteristics: Dict[str, str]) -> str:
-        """Создает мета-описание на основе описания и характеристик"""
-        meta_description = description
-        if characteristics:
-            chars_text = ". ".join([f"{key}: {value}" for key, value in characteristics.items()])
-            if len(meta_description) + len(chars_text) <= 490:
-                meta_description = f"{meta_description}. {chars_text}"
-        
-        return meta_description[:500]
-    
-    # ---------- Методы работы с базой данных ----------
-    
-    async def ensure_brand_exists(self, db: AsyncSession) -> int:
-        """
-        Проверяет существование бренда и создает его, если нет
-        Возвращает ID бренда
-        """
-        # Ищем бренд по имени или slug
+
+    @staticmethod
+    def make_meta_description(description: str, max_len: int = 500) -> str:
+        """Формирует мета-описание из текста."""
+        if not description:
+            return ""
+        # Берём часть до характеристик
+        if "\n\nХарактеристики:" in description:
+            description = description.split("\n\nХарактеристики:")[0]
+        return description[:max_len]
+
+    @staticmethod
+    def calculate_prices(original_price: float) -> Tuple[float, float]:
+        """Рассчитывает цену с наценкой 20% и цену со скидкой."""
+        discount_price = float(original_price)
+        price = round(discount_price * 1.2)
+        return price, discount_price
+
+    # ------------------------------------------------------------------ #
+    #  БД: бренд, каталог
+    # ------------------------------------------------------------------ #
+
+    async def ensure_brand(self, db: AsyncSession) -> int:
+        """Получает или создаёт бренд. Возвращает ID."""
         result = await db.execute(
             select(Brand).where(
                 or_(
                     func.lower(Brand.name) == self.brand_name.lower(),
-                    Brand.slug == self.brand_slug
+                    Brand.slug == self.brand_slug,
                 )
             )
         )
         brand = result.scalar_one_or_none()
-        
         if not brand:
-            # Создаем новый бренд
-            brand = Brand(
-                name=self.brand_name,
-                slug=self.brand_slug
-            )
+            brand = Brand(name=self.brand_name, slug=self.brand_slug)
             db.add(brand)
             await db.flush()
-            self.logger.info(f"Создан новый бренд: {self.brand_name}")
-        
+            self.logger.info("Создан бренд: %s (ID: %d)", self.brand_name, brand.id)
         return brand.id
-    
 
-    async def get_or_create_catalog(self, db: AsyncSession, catalog_name: str, catalog_slug: str, brand_id: int) -> Catalog:
-        """
-        ИСПРАВЛЕНО: Получает или создает каталог с обязательным сохранением в БД
-        """
-        # Ищем существующий каталог
-        result = await db.execute(select(Catalog).where(Catalog.slug == catalog_slug))
+    async def ensure_catalog(
+        self, db: AsyncSession, name: str, slug: str, brand_id: int
+    ) -> Catalog:
+        """Получает или создаёт каталог."""
+        result = await db.execute(select(Catalog).where(Catalog.slug == slug))
         catalog = result.scalar_one_or_none()
-        
-        if not catalog:
-            # Получаем категорию по умолчанию
-            default_category = await self.get_default_category(db)
-            
-            if not default_category:
-                self.logger.error("Не найдена категория по умолчанию для создания каталога")
-                raise ValueError("Не найдена активная категория для создания каталога")
-            
-            # Создаем новый каталог
-            catalog = Catalog(
-                name=catalog_name,
-                slug=catalog_slug,
-                category_id=default_category.id,
-                brand_id=brand_id,
-                is_active=True
-            )
-            db.add(catalog)
-            
-            # ИСПРАВЛЕНО: Принудительно сохраняем и обновляем
-            await db.flush()
-            await db.refresh(catalog)
-            
-            # ИСПРАВЛЕНО: Проверяем что ID установлен
-            if catalog.id is None:
-                await db.commit()  # Попытка принудительного коммита
-                await db.refresh(catalog)
-                
-            self.logger.info(f"Создан новый каталог: '{catalog_name}' (ID: {catalog.id}, бренд ID: {brand_id})")
-            
-            # ИСПРАВЛЕНО: Дополнительная проверка существования
-            verification_result = await db.execute(select(Catalog).where(Catalog.id == catalog.id))
-            verification_catalog = verification_result.scalar_one_or_none()
-            
-            if not verification_catalog:
-                self.logger.error(f"КРИТИЧЕСКАЯ ОШИБКА: Каталог {catalog.id} не найден после создания!")
-                raise ValueError(f"Ошибка сохранения каталога {catalog_name}")
-                
-        else:
-            # Проверяем необходимость обновления
-            update_needed = False
-            
-            if catalog.name != catalog_name:
-                catalog.name = catalog_name
-                update_needed = True
-                
+
+        if catalog:
+            changed = False
+            if catalog.name != name:
+                catalog.name = name
+                changed = True
             if catalog.brand_id != brand_id:
                 catalog.brand_id = brand_id
-                update_needed = True
-                
-            if update_needed:
-                db.add(catalog)
+                changed = True
+            if changed:
                 await db.flush()
-                await db.refresh(catalog)
-                self.logger.info(f"Обновлен каталог: '{catalog_name}' (ID: {catalog.id}, бренд ID: {brand_id})")
-        
-        return catalog
+            return catalog
 
-    async def verify_catalog_exists(self, db: AsyncSession, catalog_id: int) -> bool:
-        """
-        Проверяет, что каталог с указанным ID существует в базе данных
-        
-        """
-        result = await db.execute(select(func.count(Catalog.id)).where(Catalog.id == catalog_id))
-        count = result.scalar_one()
-        return count > 0
-    
-    async def update_catalog_image(self, db: AsyncSession, catalog: Catalog, image_url: str) -> None:
-        """Обновляет изображение каталога"""
-        catalog.image = image_url
+        # Создаём новый
+        default_cat = await self._get_default_category(db)
+        if not default_cat:
+            raise ValueError("Нет активных категорий в БД")
+
+        catalog = Catalog(
+            name=name,
+            slug=slug,
+            category_id=default_cat.id,
+            brand_id=brand_id,
+            is_active=True,
+        )
         db.add(catalog)
         await db.flush()
-        self.logger.info(f"Обновлено изображение для каталога {catalog.name}: {image_url}")
+        self.logger.info("Создан каталог: %s (ID: %d)", name, catalog.id)
+        return catalog
 
-    async def update_catalogs_brand_id(self, db: AsyncSession, brand_id: int) -> None:
-        """
-        Обновляет brand_id для всех каталогов бренда, у которых он не установлен
-        
-        """
-        # Получаем все каталоги без привязки к бренду
-        result = await db.execute(
-            select(Catalog).where(Catalog.brand_id.is_(None))
-        )
-        catalogs = result.scalars().all()
-        
-        updated_count = 0
-        for catalog in catalogs:
-            # Находим продукты каталога
-            products_result = await db.execute(
-                select(Product).where(Product.catalog_id == catalog.id)
-            )
-            products = products_result.scalars().all()
-            
-            # Анализируем бренд продуктов
-            brand_ids = set(product.brand_id for product in products if product.brand_id)
-            
-            # Если все продукты имеют одинаковый бренд и он совпадает с текущим
-            if len(brand_ids) == 1 and brand_id in brand_ids:
-                catalog.brand_id = brand_id
-                updated_count += 1
-            # Если продуктов нет или у них разные бренды, устанавливаем текущий бренд
-            elif not brand_ids:
-                catalog.brand_id = brand_id
-                updated_count += 1
-        
-        if updated_count > 0:
-            await db.flush()
-            self.logger.info(f"Обновлено {updated_count} каталогов с привязкой к бренду ID: {brand_id}")
+    # ------------------------------------------------------------------ #
+    #  БД: создание / обновление / удаление продуктов
+    # ------------------------------------------------------------------ #
 
-    async def add_product_to_category(self, db: AsyncSession, product_id: int, category_id: int, is_primary: bool = True) -> None:
+    async def upsert_product(
+        self,
+        db: AsyncSession,
+        *,
+        name: str,
+        slug: str,
+        description: str,
+        original_price: float,
+        catalog_id: int,
+        brand_id: int,
+        image_urls: List[str],
+        meta_title: str = "",
+        meta_description: str = "",
+        in_stock: bool = True,
+    ) -> Optional[Product]:
         """
-        Добавляет продукт в указанную категорию
-        
+        Создаёт или обновляет продукт + скачивает картинки.
+        Возвращает продукт.
         """
-        # Проверяем, есть ли товар в категории
-        result = await db.execute(
-            select(func.count()).select_from(product_categories).where(
-                product_categories.c.product_id == product_id,
-                product_categories.c.category_id == category_id
-            )
-        )
-        count = result.scalar_one()
-        
-        # Если товара нет в категории, добавляем
-        if count == 0:
-            values = {
-                'product_id': product_id,
-                'category_id': category_id
-            }
-            
-            # Если таблица поддерживает флаг is_primary
-            if hasattr(product_categories.c, 'is_primary'):
-                values['is_primary'] = is_primary
-                
-            stmt = insert(product_categories).values(**values)
-            await db.execute(stmt)
-            self.logger.debug(f"Продукт ID:{product_id} добавлен в категорию ID:{category_id}")
+        price, discount_price = self.calculate_prices(original_price)
 
-    async def update_category_counters(self, db: AsyncSession) -> None:
-        """Обновляет счетчики товаров для всех категорий"""
-        self.logger.info("Обновление счетчиков товаров в категориях...")
-        
-        # Получаем все категории
-        result = await db.execute(select(Category))
-        categories = result.scalars().all()
-        
-        for category in categories:
-            # Подсчитываем количество товаров в категории
-            count_query = select(func.count()).select_from(product_categories).where(
-                product_categories.c.category_id == category.id
-            )
-            result = await db.execute(count_query)
-            count = result.scalar_one()
-            
-            # Обновляем поле product_count, если оно существует
-            if hasattr(Category, 'product_count'):
-                category.product_count = count
-                db.add(category)
-                await db.flush()
-                self.logger.info(f"Категория '{category.name}': обновлено количество товаров - {count}")
-            else:
-                self.logger.warning(f"Поле 'product_count' отсутствует в модели Category")
-        
-        # Коммитим изменения
-        await db.commit()
-        self.logger.info("Счетчики товаров в категориях обновлены")
-
-    # ---------- Динамические методы работы с категориями ----------
-    def _prepare_product_text_for_analysis(self, product_in: ProductCreate) -> str:
-        """
-        УНИВЕРСАЛЬНАЯ ВЕРСИЯ: Подготавливает текст продукта для анализа категорий
-        Работает для всех скраперов
-        """
-        text_parts = []
-        
-        # Название продукта (самый важный текст)
-        if hasattr(product_in, 'name') and product_in.name:
-            text_parts.append(product_in.name)
-        
-        # Описание
-        if hasattr(product_in, 'description') and product_in.description:
-            text_parts.append(product_in.description)
-        
-        # Характеристики (если они есть как отдельное поле)
-        if hasattr(product_in, 'characteristics') and product_in.characteristics:
-            if isinstance(product_in.characteristics, dict):
-                for key, value in product_in.characteristics.items():
-                    if key and value:  # Проверяем, что не пустые
-                        text_parts.append(f"{key} {value}")
-            elif isinstance(product_in.characteristics, str):
-                text_parts.append(product_in.characteristics)
-        
-        # Мета-информация
-        if hasattr(product_in, 'meta_title') and product_in.meta_title:
-            text_parts.append(product_in.meta_title)
-        
-        if hasattr(product_in, 'meta_description') and product_in.meta_description:
-            text_parts.append(product_in.meta_description)
-        
-        # Артикул (если есть)
-        if hasattr(product_in, 'article') and product_in.article:
-            text_parts.append(product_in.article)
-        
-        # Объединяем все части
-        result = " ".join(text_parts)
-        
-        # Отладочное логирование
-        if hasattr(self, 'logger'):
-            self.logger.debug(f"Подготовлен текст для анализа ({len(result)} символов): {result[:100]}...")
-        
-        return result
-
-    async def get_all_categories_from_db(self, db: AsyncSession) -> Dict[str, Dict]:
-        """
-        УЛУЧШЕНО: Получает все активные категории из базы данных с кэшированием
-        """
-        if self._categories_cache is not None:
-            return self._categories_cache
-        
+        # Ищем существующий
         result = await db.execute(
-            select(Category).where(Category.is_active == True)
-        )
-        categories = result.scalars().all()
-        
-        category_map = {}
-        for category in categories:
-            # Генерируем ключевые слова из названия категории и её атрибутов
-            keywords, patterns = self._generate_enhanced_category_keywords(category)
-            
-            category_map[category.name.lower()] = {
-                'id': category.id,
-                'name': category.name,
-                'slug': category.slug,
-                'keywords': keywords,
-                'patterns': patterns,
-                'is_default': self._is_default_category(category.name)
-            }
-        
-        # Кэшируем результат
-        self._categories_cache = category_map
-        
-        self.logger.info(f"Загружено {len(category_map)} категорий для классификации")
-        
-        # Логируем категории для отладки
-        for name, data in category_map.items():
-            keywords_preview = data['keywords'][:3] if len(data['keywords']) > 3 else data['keywords']
-            self.logger.debug(f"Категория '{name}': keywords={keywords_preview}...")
-        
-        return category_map
-    
-    def _generate_enhanced_category_keywords(self, category: Category) -> Tuple[List[str], List[str]]:
-        """ генерация ключевых слов и паттернов для категории"""
-        keywords = set()
-        patterns = []
-        
-        # Добавляем само название категории
-        category_name_lower = category.name.lower()
-        keywords.add(category_name_lower)
-        
-        # Разбиваем название на отдельные слова
-        name_words = category_name_lower.split()
-        keywords.update(name_words)
-        
-        # Добавляем slug (если есть)
-        if hasattr(category, 'slug') and category.slug:
-            slug_words = category.slug.replace('-', ' ').split()
-            keywords.update(slug_words)
-        
-        # Добавляем мета-ключевые слова (если есть)
-        if hasattr(category, 'meta_keywords') and category.meta_keywords:
-            meta_words = [kw.strip().lower() for kw in category.meta_keywords.split(',')]
-            keywords.update(meta_words)
-        
-        # НОВОЕ: Специальные правила с морфологией и синонимами
-        category_synonyms = self._get_category_synonyms(category_name_lower)
-        keywords.update(category_synonyms)
-        
-        # НОВОЕ: Генерируем паттерны для более гибкого поиска
-        category_patterns = self._generate_category_patterns(category_name_lower)
-        patterns.extend(category_patterns)
-        
-        # Убираем пустые строки и очень короткие слова
-        keywords = {kw for kw in keywords if kw and len(kw) > 1}
-        
-        return list(keywords), patterns
-    
-    def _get_category_synonyms(self, category_name: str) -> Set[str]:
-        """
-        НОВОЕ: Получает синонимы и морфологические варианты для категории
-        """
-        synonyms = set()
-        
-        # Добавляем синонимы для найденных слов
-        for word in category_name.split():
-            word_lower = word.lower()
-            if word_lower in DOOR_SYNONYMS:
-                synonyms.update(DOOR_SYNONYMS[word_lower])
-        
-        # Также проверяем полное название категории
-        category_lower = category_name.lower()
-        if category_lower in DOOR_SYNONYMS:
-            synonyms.update(DOOR_SYNONYMS[category_lower])
-        
-        # Добавляем морфологические варианты
-        for word in category_name.split():
-            word_lower = word.lower()
-            if word_lower in MORPHOLOGY_VARIANTS:
-                synonyms.update(MORPHOLOGY_VARIANTS[word_lower])
-        
-        return synonyms
-    
-    def _generate_category_patterns(self, category_name: str) -> List[str]:
-        """
-        НОВОЕ: Генерирует регулярные выражения для более гибкого поиска
-        """
-        patterns = []
-        
-        # Паттерн для поиска слов с возможными окончаниями
-        words = category_name.split()
-        
-        for word in words:
-            if len(word) >= 4:  # Только для слов длиннее 3 символов
-                # Создаем паттерн, который ищет корень слова + любые окончания
-                root = word[:len(word)-2]  # Берем корень без последних 2 символов
-                pattern = rf'\b{re.escape(root)}\w*\b'
-                patterns.append(pattern)
-        
-        # Добавляем специальные паттерны, если они подходят к категории
-        category_lower = category_name.lower()
-        for key, patterns_list in DOOR_PATTERNS.items():
-            if key in category_lower:
-                patterns.extend(patterns_list)
-        
-        # Дополнительно проверяем отдельные слова категории
-        for word in words:
-            word_lower = word.lower()
-            for key, patterns_list in DOOR_PATTERNS.items():
-                if key in word_lower or word_lower.startswith(key[:4]):
-                    patterns.extend(patterns_list)
-                    break
-        
-        return patterns
-    
-    def _is_default_category(self, category_name: str) -> bool:
-        """Определяет, является ли категория категорией по умолчанию """
-        default_names = ['все двери', 'все товары', 'общие', 'основные', 'default']
-        return any(default in category_name.lower() for default in default_names)
-    
-    async def get_default_category(self, db: AsyncSession) -> Optional[Category]:
-        """
-        Получает общую категорию "Все двери" 
-        """
-        # Приоритет 1: Ищем "Все двери"
-        result = await db.execute(
-            select(Category).where(
-                func.lower(Category.name).like('%все двери%'),
-                Category.is_active == True
-            )
-        )
-        category = result.scalar_one_or_none()
-        if category:
-            return category
-        
-        # Приоритет 2: Ищем любую дефолтную категорию
-        result = await db.execute(
-            select(Category).where(
+            select(Product).where(
                 or_(
-                    func.lower(Category.name).like('%все товары%'),
-                    func.lower(Category.name).like('%общие%'),
-                    func.lower(Category.name).like('%основные%'),
-                    func.lower(Category.name).like('%default%')
-                ),
-                Category.is_active == True
+                    Product.slug == slug,
+                    func.lower(Product.name) == name.lower(),
+                )
             )
         )
-        category = result.scalar_one_or_none()
-        if category:
-            return category
-        
-        # Приоритет 3: Ищем первую активную категорию
+        existing = result.scalar_one_or_none()
+
+        if existing:
+            # Обновляем поля
+            existing.name = name
+            existing.slug = slug
+            existing.description = description
+            existing.price = price
+            existing.discount_price = discount_price
+            existing.catalog_id = catalog_id
+            existing.brand_id = brand_id
+            existing.in_stock = in_stock
+            existing.is_active = True
+            if meta_title:
+                existing.meta_title = meta_title
+            if meta_description:
+                existing.meta_description = meta_description
+
+            await db.flush()
+
+            # Обновляем картинки: скачиваем заново
+            await self._sync_images(db, existing.id, image_urls)
+
+            self.logger.info("Обновлён: %s (ID: %d)", name, existing.id)
+            return existing
+
+        # Создаём новый
+        product = Product(
+            name=name,
+            slug=slug,
+            description=description,
+            price=price,
+            discount_price=discount_price,
+            catalog_id=catalog_id,
+            brand_id=brand_id,
+            in_stock=in_stock,
+            is_active=True,
+            meta_title=meta_title or name,
+            meta_description=meta_description,
+        )
+        db.add(product)
+        await db.flush()
+
+        # Скачиваем картинки
+        await self._sync_images(db, product.id, image_urls)
+
+        self.logger.info("Создан: %s (ID: %d)", name, product.id)
+        return product
+
+    async def _sync_images(
+        self, db: AsyncSession, product_id: int, image_urls: List[str]
+    ) -> None:
+        """Синхронизирует изображения: удаляет старые, скачивает новые."""
+        # Удаляем старые записи в БД
+        await db.execute(
+            delete(ProductImage).where(ProductImage.product_id == product_id)
+        )
+
+        # Удаляем старые файлы с диска
+        ImageService.delete_product_images(product_id)
+
+        if not image_urls:
+            return
+
+        # Скачиваем и сохраняем
+        downloaded = self.download_product_images(product_id, image_urls)
+
+        for img_data in downloaded:
+            db.add(ProductImage(
+                product_id=product_id,
+                url=img_data["url"],
+                original_url=img_data["original_url"],
+                is_local=img_data["is_local"],
+                is_main=img_data["is_main"],
+                file_size=img_data["file_size"],
+                download_error=img_data["download_error"],
+            ))
+
+        await db.flush()
+
+    async def deactivate_missing(
+        self,
+        db: AsyncSession,
+        catalog_id: int,
+        scraped_slugs: Set[str],
+    ) -> int:
+        """
+        Деактивирует продукты, которые есть в БД но отсутствуют на сайте.
+        Возвращает количество деактивированных.
+        """
+        result = await db.execute(
+            select(Product.id, Product.slug).where(
+                Product.catalog_id == catalog_id,
+                Product.is_active == True,
+                Product.slug.notin_(scraped_slugs) if scraped_slugs else True,
+            )
+        )
+        to_deactivate = result.all()
+
+        if not to_deactivate:
+            return 0
+
+        ids = [row.id for row in to_deactivate]
+        await db.execute(
+            update(Product)
+            .where(Product.id.in_(ids))
+            .values(is_active=False)
+        )
+        await db.flush()
+
+        for row in to_deactivate:
+            self.logger.info("Деактивирован (нет на сайте): %s", row.slug)
+
+        return len(ids)
+
+    # ------------------------------------------------------------------ #
+    #  Категории
+    # ------------------------------------------------------------------ #
+
+    async def _get_default_category(self, db: AsyncSession) -> Optional[Category]:
+        """Находит категорию по умолчанию."""
+        for pattern in ["%все двери%", "%все товары%"]:
+            result = await db.execute(
+                select(Category).where(
+                    func.lower(Category.name).like(pattern),
+                    Category.is_active == True,
+                )
+            )
+            cat = result.scalar_one_or_none()
+            if cat:
+                return cat
+
+        # Fallback — первая активная
         result = await db.execute(
             select(Category).where(Category.is_active == True).limit(1)
         )
         return result.scalar_one_or_none()
-    
-    async def classify_product_to_categories(self, 
-                                           product_text: str, 
-                                           all_categories: Dict[str, Dict],
-                                           min_matches: int = 1,
-                                           debug_product_name: str = "") -> List[Dict]:
-        """
-        УЛУЧШЕНО: Классифицирует продукт по категориям с улучшенным алгоритмом
-        """
-        # Нормализуем текст для лучшего поиска
-        normalized_text = self.normalize_text_for_classification(product_text)
-        
-        self.logger.debug(f"=== КЛАССИФИКАЦИЯ ПРОДУКТА: {debug_product_name} ===")
-        self.logger.debug(f"Нормализованный текст (первые 200 символов): {normalized_text[:200]}...")
-        
-        matched_categories = []
-        
-        for category_name, category_data in all_categories.items():
-            # Пропускаем категорию "все двери" - она обрабатывается отдельно
-            if category_data.get('is_default', False):
+
+    async def get_categories(self, db: AsyncSession) -> Dict[str, Dict]:
+        """Загружает все активные категории с ключевыми словами."""
+        if self._categories_cache is not None:
+            return self._categories_cache
+
+        result = await db.execute(select(Category).where(Category.is_active == True))
+        categories = result.scalars().all()
+
+        cat_map = {}
+        for cat in categories:
+            keywords, patterns = self._build_category_keywords(cat)
+            is_default = any(
+                d in cat.name.lower()
+                for d in ("все двери", "все товары", "default")
+            )
+            cat_map[cat.name.lower()] = {
+                "id": cat.id,
+                "name": cat.name,
+                "slug": cat.slug,
+                "keywords": keywords,
+                "patterns": patterns,
+                "is_default": is_default,
+            }
+
+        self._categories_cache = cat_map
+        self.logger.info("Загружено %d категорий", len(cat_map))
+        return cat_map
+
+    def classify_product(
+        self,
+        text: str,
+        categories: Dict[str, Dict],
+        min_matches: int = 1,
+    ) -> List[Dict]:
+        """Классифицирует продукт по категориям на основе текста."""
+        normalized = self._normalize_text(text)
+        matched = []
+
+        for _name, data in categories.items():
+            if data.get("is_default"):
                 continue
-            
-            keywords = category_data.get('keywords', [])
-            patterns = category_data.get('patterns', [])
-            
-            if not keywords and not patterns:
-                continue
-            
+
+            weight = 0.0
             matches = 0
-            matched_keywords = []
-            matched_patterns = []
-            total_weight = 0
-            
-            # Ищем совпадения по ключевым словам
-            for keyword in keywords:
-                if keyword in normalized_text:
+
+            for kw in data.get("keywords", []):
+                if kw in normalized:
                     matches += 1
-                    matched_keywords.append(keyword)
-                    
-                    # Вес зависит от длины ключевого слова
-                    word_weight = len(keyword.split()) * 1.0
-                    
-                    # Бонус за точное совпадение фразы
-                    if len(keyword.split()) > 1:
-                        word_weight *= 1.5
-                    
-                    # Бонус за точное совпадение названия категории
-                    if keyword == category_name:
-                        word_weight *= 2.0
-                    
-                    total_weight += word_weight
-            
-            # НОВОЕ: Ищем совпадения по регулярным выражениям
-            for pattern in patterns:
+                    w = len(kw.split()) * 1.0
+                    if len(kw.split()) > 1:
+                        w *= 1.5
+                    if kw == _name:
+                        w *= 2.0
+                    weight += w
+
+            for pattern in data.get("patterns", []):
                 try:
-                    matches_found = re.findall(pattern, normalized_text, re.IGNORECASE)
-                    if matches_found:
-                        matches += len(matches_found)
-                        matched_patterns.extend(matches_found)
-                        # Паттерны получают больший вес
-                        total_weight += len(matches_found) * 1.5
+                    found = re.findall(pattern, normalized, re.IGNORECASE)
+                    if found:
+                        matches += len(found)
+                        weight += len(found) * 1.5
                 except re.error:
-                    self.logger.warning(f"Некорректный регулярный паттерн: {pattern}")
-            
-            # Если достаточно совпадений, добавляем категорию
+                    pass
+
             if matches >= min_matches:
-                matched_categories.append({
-                    'id': category_data['id'],
-                    'name': category_data['name'],
-                    'slug': category_data['slug'],
-                    'weight': total_weight,
-                    'matches': matches,
-                    'matched_keywords': matched_keywords,
-                    'matched_patterns': matched_patterns
+                matched.append({
+                    "id": data["id"],
+                    "name": data["name"],
+                    "weight": weight,
+                    "matches": matches,
                 })
-                
-                self.logger.debug(
-                    f"Найдена категория '{category_data['name']}': "
-                    f"вес={total_weight:.2f}, совпадений={matches}, "
-                    f"ключевые слова={matched_keywords}, "
-                    f"паттерны={matched_patterns}"
-                )
-        
-        # Сортируем по весу (по убыванию)
-        matched_categories.sort(key=lambda x: x['weight'], reverse=True)
-        
-        self.logger.info(
-            f"Классификация завершена для '{debug_product_name}': "
-            f"найдено {len(matched_categories)} подходящих категорий"
+
+        matched.sort(key=lambda x: x["weight"], reverse=True)
+        return matched
+
+    async def assign_categories(
+        self,
+        db: AsyncSession,
+        product_id: int,
+        default_category_id: int,
+        additional: List[Dict],
+        max_additional: int = 5,
+    ) -> None:
+        """Назначает продукт в категории."""
+        # Очищаем старые связи
+        await db.execute(
+            delete(product_categories).where(
+                product_categories.c.product_id == product_id
+            )
         )
-        
-        if not matched_categories:
-            self.logger.warning(
-                f"Продукт '{debug_product_name}' не классифицирован ни в одну категорию. "
-                f"Текст: {normalized_text[:100]}..."
+
+        assigned = set()
+
+        # Обязательная категория
+        await db.execute(
+            insert(product_categories).values(
+                product_id=product_id, category_id=default_category_id
             )
-        else:
-            # Показываем топ-3 категории
-            top_categories = matched_categories[:3]
-            for i, cat in enumerate(top_categories, 1):
-                self.logger.info(
-                    f"  {i}. {cat['name']} (вес: {cat['weight']:.2f}, "
-                    f"совпадений: {cat['matches']})"
+        )
+        assigned.add(default_category_id)
+
+        # Дополнительные
+        for cat in additional[:max_additional]:
+            if cat["id"] not in assigned:
+                await db.execute(
+                    insert(product_categories).values(
+                        product_id=product_id, category_id=cat["id"]
+                    )
                 )
-        
-        return matched_categories
-    
-    async def assign_product_to_all_categories(self, 
-                                         db: AsyncSession, 
-                                         product_id: int,
-                                         default_category_id: int,
-                                         additional_categories: List[Dict],
-                                         max_additional_categories: int = 5) -> None:
-        """
-        УЛУЧШЕНО: Назначает продукт в категории с ограничением количества
-        """
-        # Удаляем все существующие связи продукта с категориями
-        stmt = delete(product_categories).where(product_categories.c.product_id == product_id)
-        await db.execute(stmt)
-        
-        assigned_categories = []
-        
-        # 1. ОБЯЗАТЕЛЬНО добавляем в категорию "Все двери"
-        await self.add_product_to_category(db, product_id, default_category_id, is_primary=True)
-        assigned_categories.append(default_category_id)
-        
-        self.logger.info(f"Продукт {product_id} добавлен в основную категорию 'Все двери' (ID: {default_category_id})")
-        
-        # 2. Добавляем в дополнительные категории (ограничиваем количество)
-        categories_to_add = additional_categories[:max_additional_categories]
-        
-        for category_info in categories_to_add:
-            category_id = category_info['id']
-            category_name = category_info['name']
-            
-            # Пропускаем, если это та же категория, что и основная
-            if category_id == default_category_id:
-                continue
-            
-            # Пропускаем, если уже добавлен
-            if category_id in assigned_categories:
-                continue
-            
-            await self.add_product_to_category(db, product_id, category_id, is_primary=False)
-            assigned_categories.append(category_id)
-            
-            self.logger.info(
-                f"Продукт {product_id} добавлен в дополнительную категорию '{category_name}' "
-                f"(вес: {category_info['weight']:.2f}, совпадений: {category_info['matches']})"
-            )
-        
+                assigned.add(cat["id"])
+
         await db.flush()
-        
-        self.logger.info(f"Продукт {product_id} назначен в {len(assigned_categories)} категорий")
 
-    async def clear_product_categories(self, db: AsyncSession, product_id: int) -> None:
-        """
-        ДОБАВЛЕНО: Очищает все связи продукта с категориями
-        """
-        stmt = delete(product_categories).where(product_categories.c.product_id == product_id)
-        await db.execute(stmt)
-        self.logger.debug(f"Очищены все категории для продукта {product_id}")
+    async def update_category_counters(self, db: AsyncSession) -> None:
+        """Обновляет счётчики товаров в категориях."""
+        result = await db.execute(select(Category))
+        for cat in result.scalars().all():
+            count_result = await db.execute(
+                select(func.count()).select_from(product_categories).where(
+                    product_categories.c.category_id == cat.id
+                )
+            )
+            if hasattr(Category, "product_count"):
+                cat.product_count = count_result.scalar_one()
+        await db.flush()
 
-    # ---------- Основной метод парсинга ----------
+    # ------------------------------------------------------------------ #
+    #  Главный метод синхронизации каталога
+    # ------------------------------------------------------------------ #
 
-    def normalize_text_for_classification(self, text: str) -> str:
+    async def sync_catalog(
+        self,
+        catalog_url: str,
+        db: AsyncSession,
+    ) -> Dict:
         """
-        НОВОЕ: Нормализует текст для лучшего сопоставления с категориями
+        Полная синхронизация одного каталога:
+          1. Парсит все товары с сайта
+          2. Добавляет новые / обновляет существующие (с картинками)
+          3. Деактивирует отсутствующие
+          4. Классифицирует по категориям
+
+        Должен быть переопределён в дочерних классах через parse_catalog().
         """
+        brand_id = await self.ensure_brand(db)
+        all_categories = await self.get_categories(db)
+        default_category = await self._get_default_category(db)
+
+        if not default_category:
+            self.logger.error("Нет категории по умолчанию!")
+            return {"error": "No default category", "total": 0}
+
+        # Парсим товары (реализация в дочернем классе)
+        parsed_items = await self.parse_catalog(catalog_url, db, brand_id)
+        if not parsed_items:
+            self.logger.warning("Нет товаров в каталоге: %s", catalog_url)
+            return {"new": 0, "updated": 0, "deactivated": 0, "total": 0}
+
+        # Определяем catalog_id из первого товара
+        catalog_id = parsed_items[0].get("catalog_id")
+        scraped_slugs: Set[str] = set()
+
+        new_count = 0
+        updated_count = 0
+
+        for item in parsed_items:
+            try:
+                slug = item["slug"]
+                scraped_slugs.add(slug)
+
+                # Проверяем существование
+                result = await db.execute(
+                    select(Product.id).where(Product.slug == slug)
+                )
+                is_new = result.scalar_one_or_none() is None
+
+                # Создаём / обновляем
+                product = await self.upsert_product(db, **item)
+                if not product:
+                    continue
+
+                if is_new:
+                    new_count += 1
+                else:
+                    updated_count += 1
+
+                # Классификация
+                analysis_text = f"{item['name']} {item.get('description', '')} {item.get('meta_title', '')}"
+                additional_cats = self.classify_product(
+                    analysis_text, all_categories
+                )
+                await self.assign_categories(
+                    db, product.id, default_category.id, additional_cats
+                )
+
+            except Exception as e:
+                self.logger.error("Ошибка товара %s: %s", item.get("name", "?"), e)
+                continue
+
+        # Деактивируем отсутствующие
+        deactivated = 0
+        if catalog_id and scraped_slugs:
+            deactivated = await self.deactivate_missing(db, catalog_id, scraped_slugs)
+
+        # Обновляем счётчики категорий
+        await self.update_category_counters(db)
+
+        await db.commit()
+
+        stats = {
+            "new": new_count,
+            "updated": updated_count,
+            "deactivated": deactivated,
+            "total": new_count + updated_count,
+        }
+        self.logger.info(
+            "Синхронизация %s: новых=%d, обновлено=%d, деактивировано=%d",
+            catalog_url, new_count, updated_count, deactivated,
+        )
+        return stats
+
+    async def sync_multiple_catalogs(
+        self,
+        catalog_urls: List[str],
+        db: AsyncSession,
+    ) -> int:
+        total = 0
+        for url in catalog_urls:
+            try:
+                stats = await self.sync_catalog(url, db)
+                total += stats.get("total", 0)
+            except Exception as e:
+                self.logger.error("Ошибка каталога %s: %s", url, e, exc_info=True)
+                await db.rollback()
+        return total
+
+    async def parse_multiple_catalogs(
+        self, catalog_urls: List[str], db: AsyncSession
+    ) -> int:
+        return await self.sync_multiple_catalogs(catalog_urls, db)
+
+
+    async def parse_catalog(
+        self,
+        catalog_url: str,
+        db: AsyncSession,
+        brand_id: int,
+    ) -> List[Dict]:
+        raise NotImplementedError
+
+
+    def _build_category_keywords(self, cat: Category) -> Tuple[List[str], List[str]]:
+        keywords: Set[str] = set()
+        patterns: List[str] = []
+
+        name_lower = cat.name.lower()
+        keywords.add(name_lower)
+        keywords.update(name_lower.split())
+
+        if cat.slug:
+            keywords.update(cat.slug.replace("-", " ").split())
+
+        if hasattr(cat, "meta_keywords") and cat.meta_keywords:
+            keywords.update(kw.strip().lower() for kw in cat.meta_keywords.split(","))
+
+        # Синонимы
+        for word in name_lower.split():
+            if word in DOOR_SYNONYMS:
+                keywords.update(DOOR_SYNONYMS[word])
+            if word in MORPHOLOGY_VARIANTS:
+                keywords.update(MORPHOLOGY_VARIANTS[word])
+
+        # Паттерны
+        for word in name_lower.split():
+            if len(word) >= 4:
+                root = word[: len(word) - 2]
+                patterns.append(rf"\b{re.escape(root)}\w*\b")
+            for key, plist in DOOR_PATTERNS.items():
+                if key in word:
+                    patterns.extend(plist)
+                    break
+
+        keywords = {k for k in keywords if k and len(k) > 1}
+        return list(keywords), patterns
+
+    @staticmethod
+    def _normalize_text(text: str) -> str:
         if not text:
             return ""
-        
-        # Приводим к нижнему регистру
-        normalized = text.lower()
-        
-        # Удаляем лишние пробелы и переносы строк
-        normalized = re.sub(r'\s+', ' ', normalized)
-        
-        # Заменяем некоторые символы для лучшего поиска
-        replacements = {
-            'ё': 'е',
-            '—': '-',
-            '–': '-',
-            '"': '"',
-            '"': '"',
-            ''': "'",
-            ''': "'",
-        }
-        
-        for old, new in replacements.items():
-            normalized = normalized.replace(old, new)
-        
-        return normalized.strip()
-    
-    async def parse_multiple_catalogs(self, catalog_urls: List[str], db: AsyncSession) -> int:
-        """
-        Шаблонный метод для парсинга нескольких каталогов
-        Реализация зависит от конкретных скраперов
-        """
-        raise NotImplementedError("Этот метод должен быть переопределен в дочернем классе")
-    
-    def create_meta_description(self, description: str, characteristics: Dict[str, str] = None) -> str:
-        """
-        ИСПРАВЛЕНО: Создает мета-описание на основе описания
-        (характеристики теперь уже включены в описание)
-        """
-        if not description:
-            return ""
-        
-        # Берем первую часть описания (до характеристик, если они есть)
-        if "\n\nХарактеристики:" in description:
-            main_description = description.split("\n\nХарактеристики:")[0]
-        else:
-            main_description = description
-        
-        # Ограничиваем длину
-        return main_description[:500]
-    
-    # ---------- МЕТОДЫ ДИАГНОСТИКИ ----------
-    
-    async def diagnose_categorization_issues(self, db: AsyncSession, sample_products: List[Dict]) -> None:
-        """
-        НОВОЕ: Диагностирует проблемы с категоризацией на примере продуктов
-        
-        Args:
-            db: Сессия базы данных  
-            sample_products: Список продуктов для диагностики
-                            [{'name': str, 'description': str}, ...]
-        """
-        self.logger.info("=== ДИАГНОСТИКА СИСТЕМЫ КАТЕГОРИЗАЦИИ ===")
-        
-        # Загружаем категории
-        all_categories = await self.get_all_categories_from_db(db)
-        default_category = await self.get_default_category(db)
-        
-        self.logger.info(f"Всего категорий: {len(all_categories)}")
-        self.logger.info(f"Категория по умолчанию: {default_category.name if default_category else 'НЕ НАЙДЕНА'}")
-        
-        # Анализируем каждый продукт
-        total_classified = 0
-        total_unclassified = 0
-        
-        for product in sample_products[:10]:  # Ограничиваем до 10 продуктов
-            product_text = f"{product.get('name', '')} {product.get('description', '')}"
-            
-            matched_categories = await self.classify_product_to_categories(
-                product_text, 
-                all_categories,
-                debug_product_name=product.get('name', 'Без названия')
-            )
-            
-            if matched_categories:
-                total_classified += 1
-            else:
-                total_unclassified += 1
-        
-        # Итоговая статистика
-        self.logger.info(f"=== РЕЗУЛЬТАТЫ ДИАГНОСТИКИ ===")
-        self.logger.info(f"Классифицировано продуктов: {total_classified}")
-        self.logger.info(f"Не классифицировано продуктов: {total_unclassified}")
-        
-        if total_unclassified > 0:
-            self.logger.warning("Обнаружены проблемы с категоризацией!")
-            self.logger.warning("Рекомендации:")
-            self.logger.warning("1. Проверьте ключевые слова категорий")
-            self.logger.warning("2. Добавьте больше синонимов")
-            self.logger.warning("3. Улучшите описания продуктов")
+        t = text.lower()
+        t = re.sub(r"\s+", " ", t)
+        for old, new in {"ё": "е", "—": "-", "–": "-"}.items():
+            t = t.replace(old, new)
+        return t.strip()
+
+    def _build_product_text(self, item: Dict) -> str:
+        parts = [
+            item.get("name", ""),
+            item.get("description", ""),
+            item.get("meta_title", ""),
+            item.get("meta_description", ""),
+        ]
+        return " ".join(p for p in parts if p)
