@@ -1,10 +1,13 @@
 import logging
 from typing import List, Optional
 
-from sqlalchemy import func, select, delete as sa_delete
+from sqlalchemy import func, select, delete as sa_delete, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.catalog import Catalog
+from app.models.product import Product
+from app.models.product_image import ProductImage
+from app.models.attributes import product_categories
 from app.schemas.catalog import CatalogCreate, CatalogUpdate
 from app.utils.slug import generate_slug
 
@@ -122,3 +125,53 @@ async def get_stats(db: AsyncSession) -> dict:
         "active_catalogs": active,
         "inactive_catalogs": total - active,
     }
+
+
+async def delete_catalog(db: AsyncSession, catalog_id: int) -> bool:
+    """Удаляет каталог вместе со всеми продуктами."""
+    existing = await get_catalog(db, catalog_id)
+    if not existing:
+        return False
+
+    # Получаем ID продуктов каталога
+    result = await db.execute(select(Product.id).where(Product.catalog_id == catalog_id))
+    product_ids = [row[0] for row in result.all()]
+
+    if product_ids:
+        await db.execute(text("DELETE FROM videos WHERE product_id = ANY(:ids)"), {"ids": product_ids})
+        await db.execute(text("DELETE FROM reviews WHERE product_id = ANY(:ids)"), {"ids": product_ids})
+        await db.execute(sa_delete(ProductImage).where(ProductImage.product_id.in_(product_ids)))
+        await db.execute(sa_delete(product_categories).where(product_categories.c.product_id.in_(product_ids)))
+        await db.execute(sa_delete(Product).where(Product.catalog_id == catalog_id))
+
+    await db.execute(sa_delete(Catalog).where(Catalog.id == catalog_id))
+    await db.commit()
+    return True
+
+
+async def batch_delete(db: AsyncSession, catalog_ids: List[int]) -> int:
+    """Удаляет несколько каталогов с продуктами."""
+    result = await db.execute(select(Product.id).where(Product.catalog_id.in_(catalog_ids)))
+    product_ids = [row[0] for row in result.all()]
+
+    if product_ids:
+        await db.execute(text("DELETE FROM videos WHERE product_id = ANY(:ids)"), {"ids": product_ids})
+        await db.execute(text("DELETE FROM reviews WHERE product_id = ANY(:ids)"), {"ids": product_ids})
+        await db.execute(sa_delete(ProductImage).where(ProductImage.product_id.in_(product_ids)))
+        await db.execute(sa_delete(product_categories).where(product_categories.c.product_id.in_(product_ids)))
+        await db.execute(sa_delete(Product).where(Product.catalog_id.in_(catalog_ids)))
+
+    result = await db.execute(sa_delete(Catalog).where(Catalog.id.in_(catalog_ids)))
+    await db.commit()
+    return result.rowcount
+
+
+async def delete_all(db: AsyncSession) -> int:
+    await db.execute(text("DELETE FROM videos"))
+    await db.execute(text("DELETE FROM reviews"))
+    await db.execute(sa_delete(ProductImage))
+    await db.execute(sa_delete(product_categories))
+    await db.execute(sa_delete(Product))
+    result = await db.execute(sa_delete(Catalog))
+    await db.commit()
+    return result.rowcount

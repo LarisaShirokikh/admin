@@ -40,6 +40,34 @@ async def get_catalogs_stats(
     return await catalog_crud.get_stats(db)
 
 
+@router.post("/batch-delete", status_code=status.HTTP_200_OK)
+async def batch_delete_catalogs(
+    request: Request,
+    data: dict,
+    current_user: AdminUser = Depends(get_current_superuser),
+    db: AsyncSession = Depends(get_db),
+):
+    check_admin_rate_limit(request, max_requests=10)
+    catalog_ids = data.get("catalog_ids", [])
+    if not catalog_ids:
+        from app.core.exceptions import raise_400
+        raise_400("No catalog IDs provided")
+    deleted = await catalog_crud.batch_delete(db, catalog_ids)
+    return {"deleted": deleted, "requested": len(catalog_ids)}
+
+
+@router.delete("/all", status_code=status.HTTP_200_OK)
+async def delete_all_catalogs(
+    request: Request,
+    current_user: AdminUser = Depends(get_current_superuser),
+    db: AsyncSession = Depends(get_db),
+):
+    check_admin_rate_limit(request, max_requests=2, window_minutes=5)
+    deleted = await catalog_crud.delete_all(db)
+    return {"deleted": deleted}
+
+
+
 @router.get("/{catalog_id}", response_model=CatalogResponse)
 async def get_catalog_by_id(
     request: Request,
