@@ -8,6 +8,7 @@ from typing import Optional, List, Dict, Any, Tuple
 from sqlalchemy import and_, func, inspect, or_, select, delete, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.models import Product, ProductImage
+from app.models.attributes import product_categories
 from app.models.catalog import Catalog
 from app.models.category import Category
 from app.models.brand import Brand
@@ -21,7 +22,6 @@ logger = logging.getLogger("crud_product")
 
 def calculate_product_prices(original_price: float) -> Tuple[float, float]:
     discount_price = float(original_price)
-    # Увеличиваем на 20% и округляем до целого числа
     price = round(discount_price * 1.2)
     return price, discount_price
 
@@ -1201,11 +1201,7 @@ async def get_all_products_filtered_with_relations(
         raise
 
 def add_main_image_to_product(product: Product) -> None:
-    """
-    Добавляет поле main_image к продукту на основе его изображений.
-    """
     if hasattr(product, 'product_images') and product.product_images:
-        # Ищем изображение помеченное как главное
         main_img = next((img for img in product.product_images if getattr(img, 'is_main', False)), None)
         product.main_image = main_img.url if main_img else product.product_images[0].url
     else:
@@ -1284,13 +1280,8 @@ async def bulk_update_product_prices(
     only_in_stock: Optional[bool] = False,
     price_range: Optional[Dict[str, Optional[float]]] = None
 ) -> PriceUpdateResponse:
-    """
-    Массовое обновление цен продуктов
-    """
     try:
-        print(f"🔄 Starting bulk price update: scope={scope}, price_type={price_type}, change_type={change_type}")
-        
-        # Строим базовый запрос
+
         query = select(Product)
         conditions = []
         
@@ -1326,7 +1317,6 @@ async def bulk_update_product_prices(
         products = result.scalars().all()
         
         if not products:
-            print("❌ No products found for update")
             return PriceUpdateResponse(
                 success_count=0,
                 failed_count=0,
@@ -1405,7 +1395,6 @@ async def bulk_update_product_prices(
                       (f", discount: {old_discount_price}₽ → {product.discount_price}₽" if product.discount_price else ""))
                 
             except Exception as e:
-                print(f"❌ Error updating product {product.id}: {str(e)}")
                 failed_products.append({
                     "product_id": product.id,
                     "error": str(e),
@@ -1416,8 +1405,7 @@ async def bulk_update_product_prices(
         
         # Сохраняем изменения
         await db.commit()
-        
-        print(f"✅ Bulk update completed: {success_count} success, {failed_count} failed")
+
         
         return PriceUpdateResponse(
             success_count=success_count,
@@ -1429,7 +1417,6 @@ async def bulk_update_product_prices(
         
     except Exception as e:
         await db.rollback()
-        print(f"💥 Bulk update failed: {str(e)}")
         raise e
 
 

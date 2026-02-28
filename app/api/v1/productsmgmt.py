@@ -329,6 +329,35 @@ async def count_for_price_update(
     return {"count": count}
 
 
+@router.post("/batch-delete", status_code=status.HTTP_200_OK)
+async def batch_delete(
+    request: Request,
+    data: dict,
+    current_user: AdminUser = Depends(get_current_superuser),
+    db: AsyncSession = Depends(get_db),
+):
+    check_admin_rate_limit(request, max_requests=10)
+    product_ids = data.get("product_ids", [])
+    if not product_ids:
+        raise_400("No product IDs provided")
+    if len(product_ids) > 500:
+        raise_400("Max 500 products per batch")
+    logger.warning("Superuser %s batch deleting %d products", current_user.username, len(product_ids))
+    deleted = await crud.batch_delete(db, product_ids)
+    return {"deleted": deleted, "requested": len(product_ids)}
+
+
+@router.delete("/all", status_code=status.HTTP_200_OK)
+async def delete_all_products(
+    request: Request,
+    current_user: AdminUser = Depends(get_current_superuser),
+    db: AsyncSession = Depends(get_db),
+):
+    check_admin_rate_limit(request, max_requests=2, window_minutes=5)
+    logger.warning("Superuser %s deleting ALL products", current_user.username)
+    deleted = await crud.delete_all(db)
+    return {"deleted": deleted}
+
 # === DELETE ===
 
 
@@ -358,3 +387,5 @@ async def soft_delete(
     if not product:
         raise_404(entity="Product", id=product_id)
     return product
+
+

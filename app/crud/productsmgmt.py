@@ -1,11 +1,12 @@
 import logging
 from typing import Any, List, Optional
 
-from sqlalchemy import and_, select, func
+from sqlalchemy import and_, select, func, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.category import Category
 from app.models.product import Product
+from app.models.attributes import product_categories
 from app.models.product_image import ProductImage
 from app.crud import product as base_crud
 
@@ -306,3 +307,27 @@ async def delete_soft(db: AsyncSession, product_id: int):
     if product:
         await db.commit()
     return product
+
+
+
+
+async def batch_delete(db: AsyncSession, product_ids: List[int]) -> int:
+    await db.execute(
+        delete(ProductImage).where(ProductImage.product_id.in_(product_ids))
+    )
+    await db.execute(
+        delete(product_categories).where(product_categories.c.product_id.in_(product_ids))
+    )
+    result = await db.execute(
+        delete(Product).where(Product.id.in_(product_ids))
+    )
+    await db.commit()
+    return result.rowcount
+
+
+async def delete_all(db: AsyncSession) -> int:
+    await db.execute(delete(ProductImage))
+    await db.execute(delete(product_categories))
+    result = await db.execute(delete(Product))
+    await db.commit()
+    return result.rowcount
