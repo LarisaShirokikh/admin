@@ -7,8 +7,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload
 
 from app.core.dependencies import get_db
+from app.core.exceptions import raise_404
 from app.models.product import Product
-from app.models.product_image import ProductImage
 from app.models.brand import Brand
 from app.models.catalog import Catalog
 from app.models.category import Category
@@ -20,9 +20,25 @@ logger = logging.getLogger(__name__)
 
 def _serialize_product_card(product: Product) -> Dict[str, Any]:
     main_image = None
+    has_main_image = False
     if product.product_images:
         main = next((img for img in product.product_images if img.is_main), None)
-        main_image = main.url if main else product.product_images[0].url
+        if main:
+            main_image = main.url
+            has_main_image = True
+        else:
+            main_image = product.product_images[0].url
+
+    # Главное видео (is_featured=True)
+    main_video = None
+    main_video_thumbnail = None
+    active_videos = [v for v in (product.videos or []) if v.is_active]
+    featured = next((v for v in active_videos if v.is_featured), None)
+    if featured:
+        main_video = featured.url
+        main_video_thumbnail = featured.thumbnail_url
+
+    display_mode = "video" if main_video else "image"
 
     return {
         "id": product.id,
@@ -31,6 +47,9 @@ def _serialize_product_card(product: Product) -> Dict[str, Any]:
         "price": float(product.price) if product.price else 0.0,
         "discount_price": float(product.discount_price) if product.discount_price else None,
         "image": main_image,
+        "main_video": main_video,
+        "main_video_thumbnail": main_video_thumbnail,
+        "display_mode": display_mode,
         "brand": product.brand.name if product.brand else None,
         "in_stock": product.in_stock,
     }
@@ -38,13 +57,35 @@ def _serialize_product_card(product: Product) -> Dict[str, Any]:
 
 def _serialize_product_detail(product: Product) -> Dict[str, Any]:
     images = []
+    has_main_image = False
     for img in (product.product_images or []):
+        is_main = getattr(img, "is_main", False)
+        if is_main:
+            has_main_image = True
         images.append({
             "id": img.id,
             "url": img.url,
-            "is_main": getattr(img, "is_main", False),
+            "is_main": is_main,
             "alt_text": getattr(img, "alt_text", None),
         })
+
+    # Видео
+    videos = []
+    featured_video = None
+    active_videos = [v for v in (product.videos or []) if v.is_active]
+    for v in active_videos:
+        if v.is_featured:
+            featured_video = v
+        videos.append({
+            "id": v.id,
+            "url": v.url,
+            "thumbnail_url": v.thumbnail_url,
+            "title": v.title,
+            "duration": v.duration,
+            "is_featured": v.is_featured,
+        })
+
+    display_mode = "video" if featured_video else "image"
 
     return {
         "id": product.id,
@@ -73,6 +114,8 @@ def _serialize_product_detail(product: Product) -> Dict[str, Any]:
             for c in (product.categories or [])
         ],
         "images": images,
+        "videos": videos,
+        "display_mode": display_mode,
     }
 
 
@@ -81,6 +124,7 @@ def _base_product_query():
         joinedload(Product.product_images),
         joinedload(Product.brand),
         joinedload(Product.catalog),
+        joinedload(Product.videos),
     ).where(Product.is_active == True)
 
 
@@ -162,14 +206,13 @@ async def get_featured_products(
     limit: int = Query(8, ge=1, le=20),
     db: AsyncSession = Depends(get_db),
 ):
-
-
     query = (
         select(Product)
         .options(
             joinedload(Product.product_images),
             joinedload(Product.brand),
             joinedload(Product.catalog),
+            joinedload(Product.videos),
         )
         .outerjoin(PRModel, PRModel.product_id == Product.id)
         .where(Product.is_active == True)
@@ -261,6 +304,7 @@ async def get_product_by_slug(
             joinedload(Product.brand),
             joinedload(Product.catalog),
             joinedload(Product.categories),
+            joinedload(Product.videos),
         )
         .where(and_(Product.slug == slug, Product.is_active == True))
     )
@@ -268,6 +312,6 @@ async def get_product_by_slug(
     product = result.unique().scalar_one_or_none()
 
     if not product:
-        raise HTTPException(404, "Product not found")
+        raise_404(entity="Product", id=slug)
 
     return _serialize_product_detail(product)
