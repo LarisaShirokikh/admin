@@ -41,10 +41,15 @@ def _cleanup_loop():
 def _run_scrape_task(self, scraper_class: Type, catalog_urls: List[str], username: str, scraper_name: str):
     """Общая логика для всех Celery задач скрапинга."""
     logger.info("%s: запуск %d URL для %s", scraper_name, len(catalog_urls), username)
-    loop = _get_loop()
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
 
     try:
         async def process():
+            from app.core.database import engine
+            # Сброс пула соединений чтобы привязать к новому loop
+            await engine.dispose()
+
             async with AsyncSessionLocal() as db:
                 scraper = scraper_class()
                 total = await scraper.sync_multiple_catalogs(catalog_urls, db)
@@ -74,7 +79,8 @@ def _run_scrape_task(self, scraper_class: Type, catalog_urls: List[str], usernam
             unregister_task(username, self.request.id)
         except Exception as err:
             logger.error("Не удалось снять задачу %s: %s", self.request.id, err)
-        _cleanup_loop()
+        loop.close()
+        asyncio.set_event_loop(None)
 
 
 # === Scraper tasks ===
