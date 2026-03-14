@@ -1,3 +1,5 @@
+# app/api/v1/products.py
+
 import logging
 from typing import Any, Dict, List, Optional
 
@@ -29,7 +31,6 @@ def _serialize_product_card(product: Product) -> Dict[str, Any]:
         else:
             main_image = product.product_images[0].url
 
-    # Главное видео (is_featured=True)
     main_video = None
     main_video_thumbnail = None
     active_videos = [v for v in (product.videos or []) if v.is_active]
@@ -69,7 +70,6 @@ def _serialize_product_detail(product: Product) -> Dict[str, Any]:
             "alt_text": getattr(img, "alt_text", None),
         })
 
-    # Видео
     videos = []
     featured_video = None
     active_videos = [v for v in (product.videos or []) if v.is_active]
@@ -148,6 +148,9 @@ async def get_products(
     query = _base_product_query()
     count_query = select(func.count(Product.id)).where(Product.is_active == True)
 
+    # Effective price: discount_price if exists, otherwise price
+    effective_price = func.coalesce(Product.discount_price, Product.price)
+
     filters = []
     if category_slug:
         filters.append(Product.categories.any(Category.slug == category_slug))
@@ -156,9 +159,9 @@ async def get_products(
     if catalog_slug:
         filters.append(Product.catalog.has(Catalog.slug == catalog_slug))
     if min_price is not None:
-        filters.append(Product.price >= min_price)
+        filters.append(effective_price >= min_price)
     if max_price is not None:
-        filters.append(Product.price <= max_price)
+        filters.append(effective_price <= max_price)
     if in_stock is not None:
         filters.append(Product.in_stock == in_stock)
     if search:
@@ -169,10 +172,11 @@ async def get_products(
         query = query.where(and_(*filters))
         count_query = count_query.where(and_(*filters))
 
+    # Sort by effective price too
     sort_map = {
         "newest": Product.created_at.desc(),
-        "price_asc": Product.price.asc(),
-        "price_desc": Product.price.desc(),
+        "price_asc": effective_price.asc(),
+        "price_desc": effective_price.desc(),
         "popular": Product.rating.desc(),
     }
     query = query.order_by(sort_map.get(sort, Product.created_at.desc()))
@@ -279,10 +283,11 @@ async def get_discounted_products(
 
 @router.get("/price-range")
 async def get_price_range(db: AsyncSession = Depends(get_db)):
+    ep = func.coalesce(Product.discount_price, Product.price)
     result = await db.execute(
         select(
-            func.min(Product.price).label("min_price"),
-            func.max(Product.price).label("max_price"),
+            func.min(ep).label("min_price"),
+            func.max(ep).label("max_price"),
         ).where(Product.is_active == True)
     )
     row = result.first()

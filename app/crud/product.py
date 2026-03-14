@@ -1186,7 +1186,7 @@ async def get_all_products_filtered_with_relations(
         products, _ = await get_products_paginated_with_relations(
             db=db,
             skip=0,
-            limit=10000,  # Большой лимит вместо отсутствия лимита
+            limit=10000,
             brand_id=brand_id,
             category_id=category_id,
             catalog_id=catalog_id,

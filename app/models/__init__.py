@@ -18,7 +18,7 @@ from .analytics import AnalyticsEvent, AnalyticsSession, AnalyticsDailySummary
 from .admin import AdminUser
 from .posts import Post, PostAuthor, PostTag, PostMedia, PostView, PostLike
 
-# Импорт связующих таблиц
+
 from .attributes import product_categories
 
 __all__ = [
