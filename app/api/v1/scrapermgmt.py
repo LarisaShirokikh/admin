@@ -1,7 +1,8 @@
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, Request, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.crud import scraper as scraper_crud
+from app.crud import seo as seo_crud
 from app.core.dependencies import get_db, get_current_active_admin, get_current_superuser, check_admin_rate_limit
 from app.models.admin import AdminUser
 from app.schemas.scraper import ScraperType, ScraperRequest, ScraperResponse, ScraperStatus
@@ -110,3 +111,36 @@ async def cancel_all_tasks(
 ):
     cancelled = scraper_crud.cancel_all()
     return {"message": f"Cancelled {cancelled} tasks", "cancelled_tasks": cancelled, "cancelled_by": current_user.username}
+
+
+# === SEO Generation ===
+
+@router.post("/seo/generate-bulk")
+async def trigger_seo_bulk_generation(
+    request: Request,
+    only_empty: bool = Query(default=True),
+    current_user: AdminUser = Depends(get_current_superuser),
+    db: AsyncSession = Depends(get_db),
+):
+    check_admin_rate_limit(request, max_requests=5, window_minutes=60)
+    return await seo_crud.start_seo_bulk_generation(db, only_empty, current_user.username)
+
+
+@router.get("/seo/status")
+async def get_seo_status(
+    request: Request,
+    current_user: AdminUser = Depends(get_current_active_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    check_admin_rate_limit(request, max_requests=30, window_minutes=1)
+    return await seo_crud.get_seo_stats(db)
+
+
+@router.get("/seo/task-status/{task_id}")
+async def get_seo_task_status(
+    request: Request,
+    task_id: str,
+    current_user: AdminUser = Depends(get_current_active_admin),
+):
+    check_admin_rate_limit(request, max_requests=60, window_minutes=1)
+    return seo_crud.get_seo_task_status(task_id)

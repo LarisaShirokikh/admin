@@ -1,11 +1,3 @@
-"""
-Скрапер для сайта Лабиринт Двери.
-
-Реализует parse_catalog() — парсинг одного каталога в список dict.
-Вся логика синхронизации (создание/обновление/деактивация/картинки)
-наследуется из BaseScraper.
-"""
-
 import json
 import logging
 from typing import Dict, List
@@ -28,9 +20,6 @@ class LabirintScraper(BaseScraper):
             logger_name="labirint_scraper",
         )
 
-    # ------------------------------------------------------------------ #
-    #  Реализация parse_catalog()
-    # ------------------------------------------------------------------ #
 
     async def parse_catalog(
         self,
@@ -38,19 +27,13 @@ class LabirintScraper(BaseScraper):
         db: AsyncSession,
         brand_id: int,
     ) -> List[Dict]:
-        """
-        Парсит каталог Лабиринт и возвращает список товаров.
-        Каждый товар — dict с ключами для upsert_product().
-        """
         catalog_url = self._abs_url(catalog_url)
         catalog_slug = catalog_url.rstrip("/").split("/")[-1]
-        catalog_name = f"Входные двери Лабиринт {catalog_slug.upper()}"
+        catalog_name = f"Лабиринт {catalog_slug.upper()}"
 
-        # Каталог в БД
         catalog = await self.ensure_catalog(db, catalog_name, catalog_slug, brand_id)
         catalog_id = catalog.id
 
-        # Получаем список товаров на странице каталога
         html = self.get_html(catalog_url)
         if not html:
             return []
@@ -67,7 +50,6 @@ class LabirintScraper(BaseScraper):
                 parsed = self._parse_product_card(item, catalog_id, brand_id)
                 if parsed:
                     products.append(parsed)
-                    # Обновляем картинку каталога по первому товару
                     if not first_image_url and parsed["image_urls"]:
                         first_image_url = parsed["image_urls"][0]
             except Exception as e:
@@ -91,7 +73,6 @@ class LabirintScraper(BaseScraper):
         catalog_id: int,
         brand_id: int,
     ) -> Dict | None:
-        """Парсит одну карточку товара → dict для upsert_product()."""
         header = item.select_one(".products-list-01-item__header a")
         if not header or not header.get("href"):
             return None
@@ -114,28 +95,23 @@ class LabirintScraper(BaseScraper):
         price_el = soup.select_one(".product-01__price")
         price = self.extract_price(price_el.get_text(strip=True)) if price_el else 0
 
-        # Описание
-        description = self._extract_description(soup, name)
-
-        # Изображения
         image_urls = self._extract_images(soup)
-
+        attributes = self.extract_specs(soup)
         # Slug
         slug = generate_slug(name)
-
-        # Meta
-        meta_description = self.make_meta_description(description)
 
         return {
             "name": name,
             "slug": slug,
-            "description": description,
+            "description": "",
+            "attributes": attributes,
+            "source_url": product_url,
             "original_price": price,
             "catalog_id": catalog_id,
             "brand_id": brand_id,
             "image_urls": image_urls,
             "meta_title": name,
-            "meta_description": meta_description,
+            "meta_description": "",
             "in_stock": True,
         }
 
@@ -143,8 +119,20 @@ class LabirintScraper(BaseScraper):
     #  Извлечение данных со страницы товара
     # ------------------------------------------------------------------ #
 
+    def extract_specs(self, soup: BeautifulSoup) -> dict:
+        specs = {}
+        for row in soup.select(".product-01__parameters-item"):
+            term = row.select_one(".product-01__parameters-item-term")
+            value = row.select_one(".product-01__parameters-item-dscr")
+            if term and value:
+                key = clean_text(term.get_text())
+                val = clean_text(value.get_text())
+                if key and val:
+                    specs[key] = val
+        return specs
+
+
     def _extract_description(self, soup: BeautifulSoup, name: str) -> str:
-        """Собирает описание + характеристики."""
         parts: List[str] = []
 
         for selector in (
@@ -179,11 +167,10 @@ class LabirintScraper(BaseScraper):
 
         return description
 
+
     def _extract_images(self, soup: BeautifulSoup) -> List[str]:
-        """Собирает URL изображений со страницы товара."""
         raw_urls: List[str] = []
 
-        # Галерея
         for img in soup.select(
             ".product-gallery-01__list img, .product-gallery-01__stage-item img"
         ):
@@ -191,13 +178,11 @@ class LabirintScraper(BaseScraper):
             if url:
                 raw_urls.append(url)
 
-        # Ссылки из контейнера
         for link in soup.select(".product-gallery-01__stage-item-img-container"):
             href = link.get("href")
             if href:
                 raw_urls.append(href)
 
-        # JSON-данные в атрибутах
         for el in soup.select("[index]"):
             try:
                 data = el.get("index")

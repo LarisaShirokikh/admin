@@ -1,9 +1,3 @@
-"""
-Celery задачи:
-  - Скрапинг каталогов (с автоматическим скачиванием картинок)
-  - Миграция старых внешних картинок в локальное хранилище
-"""
-
 import asyncio
 import logging
 from typing import List, Optional, Type
@@ -12,6 +6,16 @@ from celery import shared_task
 
 from app.core.celery_config import celery_app
 from app.crud.scraper import unregister_task
+from app.models import Product
+from app.models.product_image import ProductImage
+from app.providers.anthropic.antropicflow import generate_product_seo
+from app.scrapers import LabirintScraper, AsDoorsScraper, IntecronScraper
+from app.services.image_service import ImageService
+from sqlalchemy import select, func, update
+from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
+from app.core.config import settings
+import pandas as pd
+from app.crud.import_log import create_import_log, update_import_log_status
 
 logger = logging.getLogger(__name__)
 
@@ -19,10 +23,6 @@ logger = logging.getLogger(__name__)
 # === Engine factory — свежий engine для каждой задачи ===
 
 def _create_task_session():
-    """Создаёт новый engine + session factory, привязанные к текущему event loop."""
-    from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
-    from app.core.config import settings
-
     task_engine = create_async_engine(
         settings.database_url, future=True, echo=False
     )
@@ -33,7 +33,6 @@ def _create_task_session():
 # === Common scraper runner ===
 
 def _run_scrape_task(self, scraper_class: Type, catalog_urls: List[str], username: str, scraper_name: str):
-    """Общая логика для всех Celery задач скрапинга."""
     logger.info("%s: запуск %d URL для %s", scraper_name, len(catalog_urls), username)
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
@@ -81,7 +80,6 @@ def _run_scrape_task(self, scraper_class: Type, catalog_urls: List[str], usernam
 
 @shared_task(bind=True, max_retries=3)
 def scrape_labirint_multiple_catalogs_task(self, catalog_urls: List[str], username: str):
-    from app.scrapers.labirint import LabirintScraper
     return _run_scrape_task(self, LabirintScraper, catalog_urls, username, "Labirint")
 
 
@@ -96,28 +94,136 @@ def scrape_intecron_multiple_catalogs_task(self, catalog_urls: Optional[List[str
     if not catalog_urls:
         unregister_task(username, self.request.id)
         return {"status": "error", "message": "No URLs provided"}
-    from app.scrapers.intecron import IntecronScraper
     return _run_scrape_task(self, IntecronScraper, catalog_urls, username, "Intecron")
 
 
 @shared_task(bind=True, max_retries=3)
 def scrape_as_doors_multiple_catalogs_task(self, catalog_urls: List[str], username: str):
-    from app.scrapers.as_doors import AsDoorsScraper
     return _run_scrape_task(self, AsDoorsScraper, catalog_urls, username, "AS-Doors")
+
+
+# === SEO generation task ===
+
+@shared_task(bind=True, max_retries=3)
+def generate_seo_task(self, product_id: int):
+    logger.info("SEO generation: запуск для product_id=%d", product_id)
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+
+    try:
+        async def process():
+            task_engine, TaskSession = _create_task_session()
+            try:
+                async with TaskSession() as db:
+
+                    result = await db.execute(
+                        select(Product).where(Product.id == product_id)
+                    )
+                    product = result.scalar_one_or_none()
+                    if not product:
+                        logger.warning("SEO generation: товар %d не найден", product_id)
+                        return None
+
+                    if not product.attributes:
+                        logger.warning("SEO generation: нет атрибутов у товара %d", product_id)
+                        return None
+
+                    seo_data = generate_product_seo(
+                        product_name=product.name,
+                        attributes=product.attributes,
+                    )
+                    if not seo_data:
+                        logger.warning("SEO generation: пустой результат для товара %d", product_id)
+                        return None
+
+                    await db.execute(
+                        update(Product)
+                        .where(Product.id == product_id)
+                        .values(
+                            description=seo_data.get("seo_description", ""),
+                            meta_description=seo_data.get("meta_description", ""),
+                        )
+                    )
+                    await db.commit()
+                    logger.info("SEO generation: успешно для товара %d", product_id)
+                    return seo_data
+            finally:
+                await task_engine.dispose()
+
+        result = loop.run_until_complete(process())
+        return {"status": "success", "product_id": product_id, "generated": result is not None}
+
+    except Exception as e:
+        logger.error("SEO generation: ошибка для product_id=%d: %s", product_id, e, exc_info=True)
+        if self.request.retries >= self.max_retries:
+            raise
+        self.retry(exc=e, countdown=60 * (2 ** self.request.retries))
+
+    finally:
+        loop.close()
+        asyncio.set_event_loop(None)
+
+
+@shared_task(bind=True)
+def generate_seo_bulk_task(self, only_empty: bool = True, batch_size: int = 10):
+    logger.info("SEO bulk generation: запуск, only_empty=%s", only_empty)
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+
+    try:
+        async def process():
+            task_engine, TaskSession = _create_task_session()
+            try:
+                async with TaskSession() as db:
+
+                    query = select(Product.id).where(
+                        Product.is_active == True,
+                        Product.attributes.isnot(None),
+                        Product.attributes != {},
+                    )
+                    if only_empty:
+                        query = query.where(
+                            (Product.description == None) |
+                            (Product.description == "")
+                        )
+
+                    result = await db.execute(query)
+                    product_ids = [row[0] for row in result.fetchall()]
+
+                    logger.info("SEO bulk: найдено %d товаров для обработки", len(product_ids))
+
+                    # Ставим задачи батчами с задержкой чтобы не спамить API
+                    for i, product_id in enumerate(product_ids):
+                        generate_seo_task.apply_async(
+                            args=[product_id],
+                            countdown=i * 2  # 2 секунды между задачами
+                        )
+
+                    return len(product_ids)
+            finally:
+                await task_engine.dispose()
+
+        total = loop.run_until_complete(process())
+        logger.info("SEO bulk generation: поставлено в очередь %d задач", total)
+        return {
+            "status": "success",
+            "queued": total,
+            "message": f"Поставлено в очередь {total} задач SEO-генерации",
+        }
+
+    except Exception as e:
+        logger.error("SEO bulk generation: ошибка: %s", e, exc_info=True)
+        return {"status": "error", "error": str(e)}
+
+    finally:
+        loop.close()
+        asyncio.set_event_loop(None)
 
 
 # === Миграция изображений ===
 
 @celery_app.task(bind=True)
 def migrate_external_images_task(self, batch_size: int = 50):
-    """
-    Фоновая миграция: скачивает все внешние картинки и конвертирует в локальные WebP.
-    Запускается через API: POST /admin/images/migrate
-    """
-    from app.models.product_image import ProductImage
-    from app.services.image_service import ImageService
-    from sqlalchemy import select, func
-
     logger.info("Запуск миграции внешних изображений (batch_size=%d)", batch_size)
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
@@ -219,8 +325,7 @@ def migrate_external_images_task(self, batch_size: int = 50):
 
 @celery_app.task
 def import_csv_task(file_path: str):
-    import pandas as pd
-    from app.crud.import_log import create_import_log, update_import_log_status
+
 
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
@@ -246,3 +351,4 @@ def import_csv_task(file_path: str):
     finally:
         loop.close()
         asyncio.set_event_loop(None)
+

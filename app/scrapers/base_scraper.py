@@ -1,14 +1,7 @@
-"""
-Базовый скрапер с полной синхронизацией продуктов:
-  - Добавление новых
-  - Обновление существующих
-  - Деактивация отсутствующих на сайте-доноре
-  - Скачивание и локальное хранение изображений
-"""
-
 import logging
 import re
 import time
+from datetime import datetime, timezone
 from typing import Dict, List, Optional, Set, Tuple
 
 import requests
@@ -16,6 +9,7 @@ from bs4 import BeautifulSoup
 from sqlalchemy import delete, func, insert, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
 from app.models.attributes import product_categories
 from app.models.brand import Brand
 from app.models.catalog import Catalog
@@ -29,7 +23,6 @@ from app.utils.text_utils import generate_slug
 
 
 class BaseScraper:
-    """Базовый класс для всех скраперов."""
 
     def __init__(
         self,
@@ -55,7 +48,6 @@ class BaseScraper:
     # ------------------------------------------------------------------ #
 
     def get_html(self, url: str, retries: int = 3) -> Optional[str]:
-        """Получает HTML страницы с повторными попытками."""
         url = self._abs_url(url)
         for attempt in range(retries):
             try:
@@ -70,7 +62,6 @@ class BaseScraper:
         return None
 
     def _abs_url(self, url: str) -> str:
-        """Приводит URL к абсолютному."""
         if url.startswith("http"):
             return url
         return f"{self.base_url}/{url.lstrip('/')}"
@@ -80,7 +71,6 @@ class BaseScraper:
     # ------------------------------------------------------------------ #
 
     def collect_image_urls(self, urls_found: List[str]) -> List[str]:
-        """Фильтрует и нормализует список URL изображений."""
         valid_ext = (".jpg", ".jpeg", ".png", ".webp", ".gif")
         seen: Set[str] = set()
         result: List[str] = []
@@ -103,12 +93,6 @@ class BaseScraper:
         product_id: int,
         image_urls: List[str],
     ) -> List[dict]:
-        """
-        Скачивает все изображения продукта локально.
-
-        Returns:
-            Список dict: {url, original_url, is_local, is_main, file_size, download_error}
-        """
         results = []
         for i, url in enumerate(image_urls):
             is_main = i == 0
@@ -147,7 +131,6 @@ class BaseScraper:
 
     @staticmethod
     def extract_price(text: str) -> int:
-        """Извлекает цену из текстовой строки."""
         if not text:
             return 0
         nums = re.findall(r"(\d[\s\d]*\d*)", text)
@@ -156,10 +139,8 @@ class BaseScraper:
 
     @staticmethod
     def make_meta_description(description: str, max_len: int = 500) -> str:
-        """Формирует мета-описание из текста."""
         if not description:
             return ""
-        # Берём часть до характеристик
         if "\n\nХарактеристики:" in description:
             description = description.split("\n\nХарактеристики:")[0]
         return description[:max_len]
@@ -244,14 +225,12 @@ class BaseScraper:
         catalog_id: int,
         brand_id: int,
         image_urls: List[str],
+        attributes: dict = None,  # ← новое
+        source_url: str = None,
         meta_title: str = "",
         meta_description: str = "",
         in_stock: bool = True,
     ) -> Optional[Product]:
-        """
-        Создаёт или обновляет продукт + скачивает картинки.
-        Возвращает продукт.
-        """
         price, discount_price = self.calculate_prices(original_price)
 
         # Ищем существующий
@@ -260,26 +239,30 @@ class BaseScraper:
                 or_(
                     Product.slug == slug,
                     func.lower(Product.name) == name.lower(),
+                    Product.source_url == source_url,
                 )
             )
         )
         existing = result.scalar_one_or_none()
+        now = datetime.now(timezone.utc)
 
         if existing:
-            # Обновляем поля
             existing.name = name
             existing.slug = slug
-            existing.description = description
             existing.price = price
             existing.discount_price = discount_price
             existing.catalog_id = catalog_id
             existing.brand_id = brand_id
             existing.in_stock = in_stock
             existing.is_active = True
+            existing.last_synced_at = now
+            if source_url:
+                existing.source_url = source_url
+            if attributes is not None:
+                existing.attributes = attributes
+            # description и meta_description НЕ трогаем — это SEO-контент
             if meta_title:
                 existing.meta_title = meta_title
-            if meta_description:
-                existing.meta_description = meta_description
 
             await db.flush()
 
@@ -289,11 +272,12 @@ class BaseScraper:
             self.logger.info("Обновлён: %s (ID: %d)", name, existing.id)
             return existing
 
-        # Создаём новый
         product = Product(
             name=name,
             slug=slug,
             description=description,
+            attributes=attributes or {},
+            source_url=source_url,
             price=price,
             discount_price=discount_price,
             catalog_id=catalog_id,
@@ -305,18 +289,21 @@ class BaseScraper:
         )
         db.add(product)
         await db.flush()
-
-        # Скачиваем картинки
         await self._sync_images(db, product.id, image_urls)
-
         self.logger.info("Создан: %s (ID: %d)", name, product.id)
+
+        if settings.ANTHROPIC_ENABLED:
+            try:
+                from app.worker.tasks import generate_seo_task
+                generate_seo_task.delay(product.id)
+                self.logger.info("SEO задача поставлена в очередь для товара %d", product.id)
+            except Exception as e:
+                self.logger.warning("Не удалось поставить SEO задачу для товара %d: %s", product.id, e)
         return product
 
     async def _sync_images(
         self, db: AsyncSession, product_id: int, image_urls: List[str]
     ) -> None:
-        """Синхронизирует изображения: удаляет старые, скачивает новые."""
-        # Удаляем старые записи в БД
         await db.execute(
             delete(ProductImage).where(ProductImage.product_id == product_id)
         )
@@ -349,10 +336,6 @@ class BaseScraper:
         catalog_id: int,
         scraped_slugs: Set[str],
     ) -> int:
-        """
-        Деактивирует продукты, которые есть в БД но отсутствуют на сайте.
-        Возвращает количество деактивированных.
-        """
         result = await db.execute(
             select(Product.id, Product.slug).where(
                 Product.catalog_id == catalog_id,
@@ -402,7 +385,6 @@ class BaseScraper:
         return result.scalar_one_or_none()
 
     async def get_categories(self, db: AsyncSession) -> Dict[str, Dict]:
-        """Загружает все активные категории с ключевыми словами."""
         if self._categories_cache is not None:
             return self._categories_cache
 
@@ -435,7 +417,6 @@ class BaseScraper:
         categories: Dict[str, Dict],
         min_matches: int = 1,
     ) -> List[Dict]:
-        """Классифицирует продукт по категориям на основе текста."""
         normalized = self._normalize_text(text)
         matched = []
 
@@ -515,7 +496,6 @@ class BaseScraper:
         await db.flush()
 
     async def update_category_counters(self, db: AsyncSession) -> None:
-        """Обновляет счётчики товаров в категориях."""
         result = await db.execute(select(Category))
         for cat in result.scalars().all():
             count_result = await db.execute(
@@ -577,10 +557,11 @@ class BaseScraper:
                 )
                 is_new = result.scalar_one_or_none() is None
 
-                # Создаём / обновляем
-                product = await self.upsert_product(db, **item)
-                if not product:
-                    continue
+                # Savepoint — если этот товар упадёт, откатываем только его
+                async with db.begin_nested():
+                    product = await self.upsert_product(db, **item)
+                    if not product:
+                        continue
 
                 if is_new:
                     new_count += 1

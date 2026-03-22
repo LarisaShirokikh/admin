@@ -88,6 +88,7 @@ class ProductDetail(ProductBase):
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
     main_image: Optional[str] = None
+    attributes: Optional[Dict[str, Any]] = None
     
     # Связанные объекты
     brand: Optional[BrandResponse] = None  # ОДИН бренд

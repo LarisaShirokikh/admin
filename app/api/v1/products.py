@@ -99,6 +99,7 @@ def _serialize_product_detail(product: Product) -> Dict[str, Any]:
         "type": getattr(product, "type", None),
         "rating": getattr(product, "rating", 0.0),
         "review_count": getattr(product, "review_count", 0),
+        "attributes": product.attributes or {},
         "brand": {
             "id": product.brand.id,
             "name": product.brand.name,

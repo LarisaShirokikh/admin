@@ -43,6 +43,9 @@ class Settings(BaseSettings):
     MAX_UPLOADS_PER_USER: int = 5
     MAX_UPLOADS_GLOBAL: int = 20
 
+    ANTHROPIC_ENABLED: bool
+    ANTHROPIC_API_KEY: str
+
 
 settings = Settings()
 
