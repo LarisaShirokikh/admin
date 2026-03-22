@@ -77,6 +77,59 @@ def _run_scrape_task(self, scraper_class: Type, catalog_urls: List[str], usernam
 
 
 # === Scraper tasks ===
+@shared_task(bind=True, max_retries=3)
+def scrape_labirint_auto_task(self, main_url: str, username: str):
+    logger.info("Labirint auto: запуск для %s", main_url)
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+
+    try:
+        async def process():
+            scraper = LabirintScraper()
+
+            # Шаг 1 — находим все каталоги
+            catalogs = scraper.discover_catalogs(main_url)
+            if not catalogs:
+                logger.warning("Labirint auto: каталоги не найдены на %s", main_url)
+                return 0
+
+            logger.info("Labirint auto: найдено %d каталогов", len(catalogs))
+
+            # Шаг 2 — парсим все каталоги
+            task_engine, TaskSession = _create_task_session()
+            try:
+                async with TaskSession() as db:
+                    # Передаём имена каталогов через кастомный метод
+                    total = await scraper.sync_multiple_catalogs_with_names(
+                        catalogs, db
+                    )
+                    return total
+            finally:
+                await task_engine.dispose()
+
+        total = loop.run_until_complete(process())
+        logger.info("Labirint auto: завершено, %d товаров", total)
+
+        return {
+            "status": "success",
+            "processed": total,
+            "message": f"Labirint auto: обработано {total} товаров",
+        }
+
+    except Exception as e:
+        logger.error("Labirint auto: ошибка: %s", e, exc_info=True)
+        if self.request.retries >= self.max_retries:
+            raise
+        self.retry(exc=e, countdown=30 * (2 ** self.request.retries))
+
+    finally:
+        try:
+            unregister_task(username, self.request.id)
+        except Exception as err:
+            logger.error("Не удалось снять задачу %s: %s", self.request.id, err)
+        loop.close()
+        asyncio.set_event_loop(None)
+
 
 @shared_task(bind=True, max_retries=3)
 def scrape_labirint_multiple_catalogs_task(self, catalog_urls: List[str], username: str):

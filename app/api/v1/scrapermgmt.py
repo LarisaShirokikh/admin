@@ -9,6 +9,30 @@ from app.schemas.scraper import ScraperType, ScraperRequest, ScraperResponse, Sc
 
 router = APIRouter()
 
+@router.post("/scrape-labirint-auto")
+async def scrape_labirint_auto(
+    request: Request,
+    body: ScraperRequest,
+    current_user: AdminUser = Depends(get_current_active_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    check_admin_rate_limit(request, max_requests=5, window_minutes=10)
+    await scraper_crud.require_categories(db)
+    scraper_crud.check_limits(current_user)
+
+    from app.worker.tasks import scrape_labirint_auto_task  # ← импорт внутри функции
+
+    main_url = body.catalog_urls[0] if body.catalog_urls else "https://labirintdoors.ru/katalog2"
+    task = scrape_labirint_auto_task.delay(main_url, current_user.username)
+    scraper_crud.register_task(current_user, task.id)
+
+    return {
+        "task_id": task.id,
+        "message": f"Авто-парсинг запущен для {main_url}",
+        "initiated_by": current_user.username,
+        "urls_count": 1,
+    }
+
 
 @router.post("/scrape-labirint", response_model=ScraperResponse)
 async def scrape_labirint(

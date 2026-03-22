@@ -51,6 +51,8 @@ def _serialize_product_card(product: Product) -> Dict[str, Any]:
         "main_video": main_video,
         "main_video_thumbnail": main_video_thumbnail,
         "display_mode": display_mode,
+        "created_at": product.created_at.isoformat() if product.created_at else None,
+        "updated_at": product.updated_at.isoformat() if product.updated_at else None,
         "brand": product.brand.name if product.brand else None,
         "in_stock": product.in_stock,
     }

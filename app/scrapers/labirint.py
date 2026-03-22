@@ -20,25 +20,29 @@ class LabirintScraper(BaseScraper):
             logger_name="labirint_scraper",
         )
 
-
     async def parse_catalog(
-        self,
-        catalog_url: str,
-        db: AsyncSession,
-        brand_id: int,
+            self,
+            catalog_url: str,
+            db: AsyncSession,
+            brand_id: int,
+            catalog_name: str = "",
     ) -> List[Dict]:
         catalog_url = self._abs_url(catalog_url)
         catalog_slug = catalog_url.rstrip("/").split("/")[-1]
-        catalog_name = f"Лабиринт {catalog_slug.upper()}"
-
-        catalog = await self.ensure_catalog(db, catalog_name, catalog_slug, brand_id)
-        catalog_id = catalog.id
 
         html = self.get_html(catalog_url)
         if not html:
             return []
 
         soup = BeautifulSoup(html, "html.parser")
+
+        if not catalog_name:
+            h1 = soup.select_one("h1.catalog-01__title, h1")
+            catalog_name = f"{h1.get_text(strip=True)}" if h1 else f"{catalog_slug}"
+
+        catalog = await self.ensure_catalog(db, catalog_name, catalog_slug, brand_id)
+        catalog_id = catalog.id
+
         items = soup.select("ul.products-list-01-list li.products-list-01-item")
         self.logger.info("Найдено %d карточек в каталоге %s", len(items), catalog_url)
 
@@ -55,7 +59,6 @@ class LabirintScraper(BaseScraper):
             except Exception as e:
                 self.logger.error("Ошибка парсинга карточки: %s", e, exc_info=True)
 
-        # Обновляем картинку каталога
         if first_image_url:
             catalog.image = first_image_url
             await db.flush()
@@ -63,9 +66,34 @@ class LabirintScraper(BaseScraper):
         self.logger.info("Распарсено %d товаров из %s", len(products), catalog_url)
         return products
 
-    # ------------------------------------------------------------------ #
-    #  Парсинг отдельной карточки товара
-    # ------------------------------------------------------------------ #
+
+    def discover_catalogs(self, main_url: str) -> List[Dict[str, str]]:
+        html = self.get_html(main_url)
+        if not html:
+            return []
+
+        soup = BeautifulSoup(html, "html.parser")
+        catalogs = []
+        seen_urls = set()
+
+        for item in soup.select("li.product-sections-01-item"):
+            link = item.select_one("a.product-sections-01-item__img-container")
+            name_el = item.select_one(".product-sections-01-item__name")
+
+            if not link or not link.get("href"):
+                continue
+
+            url = self._abs_url(link["href"])
+            if url in seen_urls:
+                continue
+            seen_urls.add(url)
+
+            name = name_el.get_text(strip=True) if name_el else ""
+            catalogs.append({"url": url, "name": f"Лабиринт {name}"})
+            self.logger.info("Найден каталог: %s → %s", name, url)
+
+        return catalogs
+
 
     def _parse_product_card(
         self,
@@ -115,9 +143,6 @@ class LabirintScraper(BaseScraper):
             "in_stock": True,
         }
 
-    # ------------------------------------------------------------------ #
-    #  Извлечение данных со страницы товара
-    # ------------------------------------------------------------------ #
 
     def extract_specs(self, soup: BeautifulSoup) -> dict:
         specs = {}

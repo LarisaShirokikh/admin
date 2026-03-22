@@ -16,6 +16,8 @@ from app.models.catalog import Catalog
 from app.models.category import Category
 from app.models.product import Product
 from app.models.product_image import ProductImage
+from app.providers.anthropic.ansession import create_anthropic_client
+from app.providers.anthropic.antropicflow import classify_product_categories
 from app.schemas.product_image import ProductImageCreate
 from app.services.image_service import ImageService
 from app.scrapers.door_synonyms import DOOR_PATTERNS, DOOR_SYNONYMS, MORPHOLOGY_VARIANTS
@@ -66,6 +68,40 @@ class BaseScraper:
             return url
         return f"{self.base_url}/{url.lstrip('/')}"
 
+    async def _classify_with_ai(
+            self,
+            product_name: str,
+            attributes: dict,
+            all_categories: Dict[str, Dict],
+            default_category,
+    ) -> List[Dict]:
+        cat_names = [
+            data["name"]
+            for data in all_categories.values()
+            if not data.get("is_default")
+        ]
+
+        client = create_anthropic_client()
+        if not client:
+            # Fallback на keyword matching
+            return self.classify_product(product_name, all_categories)
+
+        matched_names = classify_product_categories(
+            client, product_name, attributes, cat_names
+        )
+        self.logger.info(
+            "AI классификация '%s': %s", product_name, matched_names
+        )
+
+
+        result = []
+        for name in matched_names:
+            for data in all_categories.values():
+                if data["name"] == name and not data.get("is_default"):
+                    result.append({"id": data["id"], "name": data["name"], "weight": 1.0, "matches": 1})
+                    break
+
+        return result
     # ------------------------------------------------------------------ #
     #  Изображения
     # ------------------------------------------------------------------ #
@@ -330,6 +366,7 @@ class BaseScraper:
 
         await db.flush()
 
+
     async def deactivate_missing(
         self,
         db: AsyncSession,
@@ -515,16 +552,8 @@ class BaseScraper:
         self,
         catalog_url: str,
         db: AsyncSession,
+        catalog_name: str = "",
     ) -> Dict:
-        """
-        Полная синхронизация одного каталога:
-          1. Парсит все товары с сайта
-          2. Добавляет новые / обновляет существующие (с картинками)
-          3. Деактивирует отсутствующие
-          4. Классифицирует по категориям
-
-        Должен быть переопределён в дочерних классах через parse_catalog().
-        """
         brand_id = await self.ensure_brand(db)
         all_categories = await self.get_categories(db)
         default_category = await self._get_default_category(db)
@@ -533,13 +562,11 @@ class BaseScraper:
             self.logger.error("Нет категории по умолчанию!")
             return {"error": "No default category", "total": 0}
 
-        # Парсим товары (реализация в дочернем классе)
-        parsed_items = await self.parse_catalog(catalog_url, db, brand_id)
+        parsed_items = await self.parse_catalog(catalog_url, db, brand_id, catalog_name=catalog_name)
         if not parsed_items:
             self.logger.warning("Нет товаров в каталоге: %s", catalog_url)
             return {"new": 0, "updated": 0, "deactivated": 0, "total": 0}
 
-        # Определяем catalog_id из первого товара
         catalog_id = parsed_items[0].get("catalog_id")
         scraped_slugs: Set[str] = set()
 
@@ -568,14 +595,18 @@ class BaseScraper:
                 else:
                     updated_count += 1
 
-                # Классификация
-                analysis_text = f"{item['name']} {item.get('description', '')} {item.get('meta_title', '')}"
-                additional_cats = self.classify_product(
-                    analysis_text, all_categories
-                )
-                await self.assign_categories(
-                    db, product.id, default_category.id, additional_cats
-                )
+                if settings.ANTHROPIC_ENABLED and item.get("attributes"):
+                    additional_cats = await self._classify_with_ai(
+                        item["name"],
+                        item["attributes"],
+                        all_categories,
+                        default_category,
+                    )
+                else:
+                    analysis_text = f"{item['name']} {item.get('description', '')} {item.get('meta_title', '')}"
+                    additional_cats = self.classify_product(analysis_text, all_categories)
+
+                await self.assign_categories(db, product.id, default_category.id, additional_cats)
 
             except Exception as e:
                 self.logger.error("Ошибка товара %s: %s", item.get("name", "?"), e)
@@ -624,14 +655,6 @@ class BaseScraper:
         return await self.sync_multiple_catalogs(catalog_urls, db)
 
 
-    async def parse_catalog(
-        self,
-        catalog_url: str,
-        db: AsyncSession,
-        brand_id: int,
-    ) -> List[Dict]:
-        raise NotImplementedError
-
 
     def _build_category_keywords(self, cat: Category) -> Tuple[List[str], List[str]]:
         keywords: Set[str] = set()
@@ -666,6 +689,23 @@ class BaseScraper:
 
         keywords = {k for k in keywords if k and len(k) > 1}
         return list(keywords), patterns
+
+
+    async def sync_multiple_catalogs_with_names(
+            self,
+            catalogs: List[Dict[str, str]],  # [{"url": ..., "name": ...}]
+            db: AsyncSession,
+    ) -> int:
+        total = 0
+        for item in catalogs:
+            try:
+                stats = await self.sync_catalog(item["url"], db, catalog_name=item["name"])
+                total += stats.get("total", 0)
+            except Exception as e:
+                self.logger.error("Ошибка каталога %s: %s", item["url"], e, exc_info=True)
+                await db.rollback()
+        return total
+
 
     @staticmethod
     def _normalize_text(text: str) -> str:
