@@ -4,7 +4,7 @@ from app.api.v1.auth import router as auth_router
 from app.api.v1.products import router as products_router
 from app.api.v1.posts import router as posts_router
 from app.api.v1.search import router as search_router
-# from app.api.v1.sitemap import router as sitemap_router
+from app.api.v1.sitemap import router as sitemap_router
 from app.api.v1.analytics import router as analytics_router
 
 from app.api.v1.productsmgmt import router as productsmgmt_router
@@ -31,7 +31,7 @@ api_router.include_router(auth_router, prefix="/auth", tags=["Auth"])
 api_router.include_router(products_router, prefix="/products", tags=["Products"])
 api_router.include_router(posts_router, prefix="/posts", tags=["Posts"])
 api_router.include_router(search_router, prefix="/search", tags=["Search"])
-# api_router.include_router(sitemap_router, prefix="/sitemap", tags=["Sitemap"])
+api_router.include_router(sitemap_router, prefix="/sitemap", tags=["Sitemap"])
 api_router.include_router(analytics_router, prefix="/analytics", tags=["Analytics"])
 
 # Admin
