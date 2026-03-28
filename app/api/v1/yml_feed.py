@@ -2,7 +2,8 @@ import logging
 from fastapi import APIRouter, Depends
 from fastapi.responses import Response
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, selectinload
+from sqlalchemy import select
+from sqlalchemy.orm import selectinload
 from app.core.dependencies import get_db
 from app.models.product import Product
 from app.models.catalog import Catalog
