@@ -2,7 +2,7 @@ import logging
 from fastapi import APIRouter, Depends
 from fastapi.responses import Response
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import select, selectinload
 from app.core.dependencies import get_db
 from app.models.product import Product
 from app.models.catalog import Catalog
@@ -14,6 +14,7 @@ logger = logging.getLogger(__name__)
 async def get_yml_feed(db: AsyncSession = Depends(get_db)):
     result = await db.execute(
         select(Product)
+        .options(selectinload(Product.product_images))
         .where(Product.is_active == True, Product.price > 0)
         .limit(10000)
     )
