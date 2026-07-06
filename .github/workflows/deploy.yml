@@ -20,6 +20,5 @@ jobs:
           cd /home/deploy/doors/admin-backend
           git pull origin main
           cd /home/deploy/doors
-          docker compose build admin --no-cache
-          docker compose up -d admin
-          docker compose restart worker
+          docker compose build admin worker --no-cache
+          docker compose up -d admin worker beat

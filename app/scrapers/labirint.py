@@ -1,5 +1,6 @@
 import json
 import logging
+import re
 from typing import Dict, List
 
 from bs4 import BeautifulSoup
@@ -9,6 +10,21 @@ from app.scrapers.base_scraper import BaseScraper
 from app.utils.text_utils import generate_slug, clean_text
 
 logger = logging.getLogger("labirint_scraper")
+
+
+def clean_catalog_name(raw: str) -> str:
+    """Normalizes donor catalog names to "Лабиринт <Model>".
+
+    Donor titles look like "Входные двери Лабиринт Кармина от 41 300 руб."
+    or "Лабиринт Входные двери Пиано Смарт 2.0".
+    """
+    name = raw or ""
+    name = re.sub(r"от\s[\d\s]+руб\.?", "", name, flags=re.IGNORECASE)
+    name = re.sub(r"входн(ые|ая)\s+двер(и|ь)", "", name, flags=re.IGNORECASE)
+    name = re.sub(r"лабиринт", "", name, flags=re.IGNORECASE)
+    name = re.sub(r"\s+", " ", name).strip(" -—.")
+    return f"Лабиринт {name}".strip() if name else "Лабиринт"
+
 
 
 class LabirintScraper(BaseScraper):
@@ -38,7 +54,8 @@ class LabirintScraper(BaseScraper):
 
         if not catalog_name:
             h1 = soup.select_one("h1.catalog-01__title, h1")
-            catalog_name = f"{h1.get_text(strip=True)}" if h1 else f"{catalog_slug}"
+            catalog_name = h1.get_text(strip=True) if h1 else catalog_slug
+        catalog_name = clean_catalog_name(catalog_name)
 
         catalog = await self.ensure_catalog(db, catalog_name, catalog_slug, brand_id)
         catalog_id = catalog.id
@@ -89,7 +106,7 @@ class LabirintScraper(BaseScraper):
             seen_urls.add(url)
 
             name = name_el.get_text(strip=True) if name_el else ""
-            catalogs.append({"url": url, "name": f"Лабиринт {name}"})
+            catalogs.append({"url": url, "name": clean_catalog_name(name)})
             self.logger.info("Найден каталог: %s → %s", name, url)
 
         return catalogs

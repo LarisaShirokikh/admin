@@ -405,3 +405,87 @@ def import_csv_task(file_path: str):
         loop.close()
         asyncio.set_event_loop(None)
 
+# === Weekly full sync (celery beat) ===
+
+@shared_task(bind=True, max_retries=2)
+def labirint_weekly_sync_task(self):
+    """Weekly donor sync: discover all catalogs, diff-sync products,
+    deactivate products/catalogs that disappeared, refresh counters."""
+    logger.info("Labirint weekly: старт")
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        async def process():
+            scraper = LabirintScraper()
+            catalogs = scraper.discover_catalogs("https://labirintdoors.ru")
+            if not catalogs:
+                logger.error("Labirint weekly: каталоги не найдены, синк отменён")
+                return {"error": "no catalogs discovered"}
+
+            seen_slugs = {c["url"].rstrip("/").split("/")[-1] for c in catalogs}
+            task_engine, TaskSession = _create_task_session()
+            try:
+                async with TaskSession() as db:
+                    total = await scraper.sync_multiple_catalogs_with_names(catalogs, db)
+                    brand_id = await scraper.ensure_brand(db)
+                    gone = await scraper.deactivate_missing_catalogs(db, brand_id, seen_slugs)
+                    await scraper.update_category_counters(db)
+                    await db.commit()
+                    return {"catalogs": len(catalogs), "products": total, "deactivated_by_catalog": gone}
+            finally:
+                await task_engine.dispose()
+
+        result = loop.run_until_complete(process())
+        logger.info("Labirint weekly: завершено %s", result)
+        return {"status": "success", **(result or {})}
+    except Exception as e:
+        logger.error("Labirint weekly: ошибка: %s", e, exc_info=True)
+        if self.request.retries >= self.max_retries:
+            raise
+        self.retry(exc=e, countdown=600)
+    finally:
+        loop.close()
+        asyncio.set_event_loop(None)
+
+
+@shared_task(bind=True)
+def reclassify_all_products_task(self):
+    """One-off: re-assign categories for every active product using the rule engine."""
+    logger.info("Reclassify: старт")
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        async def process():
+            from app.scrapers.base_scraper import BaseScraper
+            scraper = LabirintScraper()
+            task_engine, TaskSession = _create_task_session()
+            try:
+                async with TaskSession() as db:
+                    all_categories = await scraper.get_categories(db)
+                    default_category = await scraper._get_default_category(db)
+                    result = await db.execute(
+                        select(Product).where(Product.is_active == True)
+                    )
+                    products = result.scalars().all()
+                    done = 0
+                    for product in products:
+                        cats = scraper.rules_categories(
+                            product.name, product.attributes or {}, all_categories
+                        )
+                        await scraper.assign_categories(db, product.id, default_category.id, cats)
+                        done += 1
+                        if done % 200 == 0:
+                            logger.info("Reclassify: %d/%d", done, len(products))
+                            await db.commit()
+                    await scraper.update_category_counters(db)
+                    await db.commit()
+                    return done
+            finally:
+                await task_engine.dispose()
+
+        done = loop.run_until_complete(process())
+        logger.info("Reclassify: готово, %d товаров", done)
+        return {"status": "success", "processed": done}
+    finally:
+        loop.close()
+        asyncio.set_event_loop(None)

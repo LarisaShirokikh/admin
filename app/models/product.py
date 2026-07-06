@@ -38,6 +38,8 @@ class Product(Base):
     source_url = Column(String(500), nullable=True, index=True)
     needs_review = Column(Boolean, default=False)
     last_synced_at = Column(DateTime(timezone=True), nullable=True)
+    # Fingerprint of scraped content; sync skips products whose hash is unchanged
+    content_hash = Column(String(64), nullable=True, index=True)
     missing_since = Column(DateTime(timezone=True), nullable=True)
 
     category_id = Column(Integer, ForeignKey("categories.id"), nullable=True)

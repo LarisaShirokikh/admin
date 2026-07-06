@@ -1,3 +1,5 @@
+import hashlib
+import json
 import logging
 import re
 import time
@@ -20,6 +22,7 @@ from app.providers.anthropic.ansession import create_anthropic_client
 from app.providers.anthropic.antropicflow import classify_product_categories
 from app.schemas.product_image import ProductImageCreate
 from app.services.image_service import ImageService
+from app.scrapers.category_rules import classify_by_rules
 from app.scrapers.door_synonyms import DOOR_PATTERNS, DOOR_SYNONYMS, MORPHOLOGY_VARIANTS
 from app.utils.text_utils import generate_slug
 
@@ -250,6 +253,29 @@ class BaseScraper:
     #  БД: создание / обновление / удаление продуктов
     # ------------------------------------------------------------------ #
 
+    @staticmethod
+    def content_fingerprint(
+        name: str,
+        original_price: float,
+        attributes: dict,
+        image_urls: List[str],
+        in_stock: bool,
+        catalog_id: int,
+    ) -> str:
+        payload = json.dumps(
+            {
+                "name": name,
+                "price": original_price,
+                "attrs": attributes or {},
+                "images": sorted(image_urls or []),
+                "in_stock": in_stock,
+                "catalog_id": catalog_id,
+            },
+            sort_keys=True,
+            ensure_ascii=False,
+        )
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
     async def upsert_product(
         self,
         db: AsyncSession,
@@ -266,8 +292,11 @@ class BaseScraper:
         meta_title: str = "",
         meta_description: str = "",
         in_stock: bool = True,
-    ) -> Optional[Product]:
+    ) -> Tuple[Optional[Product], str]:
         price, discount_price = self.calculate_prices(original_price)
+        fingerprint = self.content_fingerprint(
+            name, original_price, attributes, image_urls, in_stock, catalog_id
+        )
 
         # Ищем существующий
         result = await db.execute(
@@ -283,6 +312,12 @@ class BaseScraper:
         now = datetime.now(timezone.utc)
 
         if existing:
+            if existing.content_hash == fingerprint and existing.is_active:
+                # Nothing changed at the donor: only mark as seen
+                existing.last_synced_at = now
+                await db.flush()
+                return existing, "skipped"
+
             existing.name = name
             existing.slug = slug
             existing.price = price
@@ -299,14 +334,15 @@ class BaseScraper:
             # description и meta_description НЕ трогаем — это SEO-контент
             if meta_title:
                 existing.meta_title = meta_title
+            existing.content_hash = fingerprint
 
             await db.flush()
 
-            # Обновляем картинки: скачиваем заново
+            # Content changed: re-download images
             await self._sync_images(db, existing.id, image_urls)
 
             self.logger.info("Обновлён: %s (ID: %d)", name, existing.id)
-            return existing
+            return existing, "updated"
 
         product = Product(
             name=name,
@@ -322,6 +358,7 @@ class BaseScraper:
             is_active=True,
             meta_title=meta_title or name,
             meta_description=meta_description,
+            content_hash=fingerprint,
         )
         db.add(product)
         await db.flush()
@@ -335,7 +372,7 @@ class BaseScraper:
                 self.logger.info("SEO задача поставлена в очередь для товара %d", product.id)
             except Exception as e:
                 self.logger.warning("Не удалось поставить SEO задачу для товара %d: %s", product.id, e)
-        return product
+        return product, "new"
 
     async def _sync_images(
         self, db: AsyncSession, product_id: int, image_urls: List[str]
@@ -397,6 +434,36 @@ class BaseScraper:
             self.logger.info("Деактивирован (нет на сайте): %s", row.slug)
 
         return len(ids)
+
+    async def deactivate_missing_catalogs(
+        self,
+        db: AsyncSession,
+        brand_id: int,
+        seen_catalog_slugs: Set[str],
+    ) -> int:
+        """Deactivates brand catalogs (and their products) that vanished from the donor."""
+        if not seen_catalog_slugs:
+            return 0
+        result = await db.execute(
+            select(Catalog).where(
+                Catalog.brand_id == brand_id,
+                Catalog.is_active == True,
+                Catalog.slug.notin_(seen_catalog_slugs),
+            )
+        )
+        gone = result.scalars().all()
+        deactivated_products = 0
+        for cat in gone:
+            cat.is_active = False
+            res = await db.execute(
+                update(Product)
+                .where(Product.catalog_id == cat.id, Product.is_active == True)
+                .values(is_active=False)
+            )
+            deactivated_products += res.rowcount or 0
+            self.logger.info("Каталог пропал у донора, деактивирован: %s", cat.slug)
+        await db.flush()
+        return deactivated_products
 
     # ------------------------------------------------------------------ #
     #  Категории
@@ -532,12 +599,34 @@ class BaseScraper:
 
         await db.flush()
 
+    def rules_categories(
+        self,
+        name: str,
+        attributes: dict,
+        all_categories: Dict[str, Dict],
+    ) -> List[Dict]:
+        """Deterministic rules first; keyword classifier as a safety net."""
+        slug_map = {data["slug"]: data for data in all_categories.values()}
+        matched = []
+        for slug in classify_by_rules(name, attributes):
+            data = slug_map.get(slug)
+            if data:
+                matched.append({"id": data["id"], "name": data["name"], "weight": 10.0, "matches": 1})
+        if matched:
+            return matched
+        return self.classify_product(f"{name}", all_categories)
+
     async def update_category_counters(self, db: AsyncSession) -> None:
+        """Real counters: only active products in stock lists."""
         result = await db.execute(select(Category))
         for cat in result.scalars().all():
             count_result = await db.execute(
-                select(func.count()).select_from(product_categories).where(
-                    product_categories.c.category_id == cat.id
+                select(func.count())
+                .select_from(product_categories)
+                .join(Product, Product.id == product_categories.c.product_id)
+                .where(
+                    product_categories.c.category_id == cat.id,
+                    Product.is_active == True,
                 )
             )
             if hasattr(Category, "product_count"):
@@ -572,39 +661,31 @@ class BaseScraper:
 
         new_count = 0
         updated_count = 0
+        skipped_count = 0
 
         for item in parsed_items:
             try:
                 slug = item["slug"]
                 scraped_slugs.add(slug)
 
-                # Проверяем существование
-                result = await db.execute(
-                    select(Product.id).where(Product.slug == slug)
-                )
-                is_new = result.scalar_one_or_none() is None
-
-                # Savepoint — если этот товар упадёт, откатываем только его
+                # Savepoint: a failing product rolls back alone
                 async with db.begin_nested():
-                    product = await self.upsert_product(db, **item)
+                    product, status = await self.upsert_product(db, **item)
                     if not product:
                         continue
 
-                if is_new:
+                if status == "skipped":
+                    skipped_count += 1
+                    continue  # unchanged: categories stay as they are
+
+                if status == "new":
                     new_count += 1
                 else:
                     updated_count += 1
 
-                if settings.ANTHROPIC_ENABLED and item.get("attributes"):
-                    additional_cats = await self._classify_with_ai(
-                        item["name"],
-                        item["attributes"],
-                        all_categories,
-                        default_category,
-                    )
-                else:
-                    analysis_text = f"{item['name']} {item.get('description', '')} {item.get('meta_title', '')}"
-                    additional_cats = self.classify_product(analysis_text, all_categories)
+                additional_cats = self.rules_categories(
+                    item["name"], item.get("attributes") or {}, all_categories
+                )
 
                 await self.assign_categories(db, product.id, default_category.id, additional_cats)
 
@@ -625,12 +706,13 @@ class BaseScraper:
         stats = {
             "new": new_count,
             "updated": updated_count,
+            "skipped": skipped_count,
             "deactivated": deactivated,
-            "total": new_count + updated_count,
+            "total": new_count + updated_count + skipped_count,
         }
         self.logger.info(
-            "Синхронизация %s: новых=%d, обновлено=%d, деактивировано=%d",
-            catalog_url, new_count, updated_count, deactivated,
+            "Синхронизация %s: новых=%d, обновлено=%d, без изменений=%d, деактивировано=%d",
+            catalog_url, new_count, updated_count, skipped_count, deactivated,
         )
         return stats
 
