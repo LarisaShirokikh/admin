@@ -123,7 +123,7 @@ class PostBase(BaseModel):
 
 
 class PostCreate(PostBase):
-    author_id: int
+    author_id: Optional[int] = None
     tag_ids: Optional[List[int]] = []
     published_at: Optional[datetime] = None
     extra_data: Optional[dict] = None

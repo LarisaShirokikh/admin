@@ -15,7 +15,6 @@ post_tags_association = Table(
 
 
 class PostAuthor(Base):
-    """Модель автора поста"""
     __tablename__ = "post_authors"
 
     id = Column(Integer, primary_key=True, index=True)
@@ -51,7 +50,6 @@ class PostTag(Base):
 
 
 class PostMedia(Base):
-    """Модель медиа-файлов поста"""
     __tablename__ = "post_media"
 
     id = Column(Integer, primary_key=True, index=True)
@@ -116,19 +114,10 @@ class Post(Base):
     tags = relationship("PostTag", secondary=post_tags_association, back_populates="posts")
     media = relationship("PostMedia", back_populates="post", order_by="PostMedia.order")
     
-    # Свойство для получения главного медиа
-    @property
-    def featured_media(self):
-        """Получить главное медиа поста"""
-        for media_item in self.media:
-            if media_item.is_featured:
-                return media_item
-        # Если нет featured, возвращаем первое по порядку
-        return self.media[0] if self.media else None
+
 
 
 class PostView(Base):
-    """Модель для отслеживания просмотров постов"""
     __tablename__ = "post_views"
 
     id = Column(Integer, primary_key=True, index=True)

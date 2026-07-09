@@ -22,6 +22,7 @@ from app.api.v1.categories import router as categories_router
 from app.api.v1.banners import router as banners_router
 from app.api.v1.bannersmgmt import router as bannersmgmt_router
 from app.api.v1.yml_feed import router as yml_feed_router
+from app.api.v1.postsmgmt import router as postsmgmt_router
 
 api_router = APIRouter(prefix="/api/v1")
 
@@ -51,3 +52,4 @@ api_router.include_router(categories_router, prefix="/categories", tags=["Catego
 api_router.include_router(banners_router, prefix="/banners", tags=["Banners"])
 api_router.include_router(bannersmgmt_router, prefix="/bannersmgmt", tags=["Banners Admin"])
 api_router.include_router(yml_feed_router, prefix="/yml-feed", tags=["YML Feed"])
+api_router.include_router(postsmgmt_router, prefix="/postsmgmt", tags=["Posts Admin"])
