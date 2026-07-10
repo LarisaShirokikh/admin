@@ -24,4 +24,12 @@ celery_app.conf.beat_schedule = {
         "task": "app.worker.tasks.bunker_weekly_sync_task",
         "schedule": crontab(minute=7, hour=1, day_of_week="sunday"),
     },
+    "intecron-weekly-sync": {
+        "task": "app.worker.tasks.intecron_weekly_sync_task",
+        "schedule": crontab(minute=7, hour=2, day_of_week="sunday"),
+    },
+    "as-doors-weekly-sync": {
+        "task": "app.worker.tasks.as_doors_weekly_sync_task",
+        "schedule": crontab(minute=7, hour=3, day_of_week="sunday"),
+    },
 }

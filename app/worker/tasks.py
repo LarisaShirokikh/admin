@@ -489,6 +489,55 @@ def bunker_weekly_sync_task(self):
         asyncio.set_event_loop(None)
 
 
+def _donor_weekly_sync(self, scraper_cls, main_url: str, label: str):
+    """Shared body for weekly donor syncs (discover, diff-sync, deactivate)."""
+    logger.info("%s weekly: start", label)
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        async def process():
+            scraper = scraper_cls()
+            catalogs = scraper.discover_catalogs(main_url)
+            if not catalogs:
+                logger.error("%s weekly: no catalogs discovered, sync aborted", label)
+                return {"error": "no catalogs discovered"}
+
+            seen_slugs = {c["url"].rstrip("/").split("/")[-1] for c in catalogs}
+            task_engine, TaskSession = _create_task_session()
+            try:
+                async with TaskSession() as db:
+                    total = await scraper.sync_multiple_catalogs_with_names(catalogs, db)
+                    brand_id = await scraper.ensure_brand(db)
+                    gone = await scraper.deactivate_missing_catalogs(db, brand_id, seen_slugs)
+                    await scraper.update_category_counters(db)
+                    await db.commit()
+                    return {"catalogs": len(catalogs), "products": total, "deactivated_by_catalog": gone}
+            finally:
+                await task_engine.dispose()
+
+        result = loop.run_until_complete(process())
+        logger.info("%s weekly: done %s", label, result)
+        return {"status": "success", **(result or {})}
+    except Exception as e:
+        logger.error("%s weekly: error: %s", label, e, exc_info=True)
+        if self.request.retries >= self.max_retries:
+            raise
+        self.retry(exc=e, countdown=600)
+    finally:
+        loop.close()
+        asyncio.set_event_loop(None)
+
+
+@shared_task(bind=True, max_retries=2)
+def intecron_weekly_sync_task(self):
+    return _donor_weekly_sync(self, IntecronScraper, "https://intecron-msk.ru", "Intecron")
+
+
+@shared_task(bind=True, max_retries=2)
+def as_doors_weekly_sync_task(self):
+    return _donor_weekly_sync(self, AsDoorsScraper, "https://as-doors.ru", "AS-Doors")
+
+
 @shared_task(bind=True)
 def reclassify_all_products_task(self):
     """One-off: re-assign categories for every active product using the rule engine."""

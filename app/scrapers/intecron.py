@@ -1,21 +1,42 @@
+"""Scraper for the official Intecron site intecron-msk.ru (Bitrix).
+
+Rewritten 2026-07-10 for the current BaseScraper architecture (diff-sync,
+content_hash, category_rules), modeled after labirint.py/bunker_doors.py.
+
+Donor structure:
+  /catalog/intekron/                       — list of series
+  /catalog/intekron/<series>/              — series page with variant links
+  /catalog/intekron/<series>/<variant>/    — product variant page
+Shop catalog = series ("Интекрон Гектор"), product = variant.
+Variant page: h1 name, #price_value[data-value] price, .specific-tbl specs,
+first /upload/iblock image as the photo.
 """
-Скрапер для сайта Intecron
-"""
-from typing import List, Optional
 import logging
 import re
+from typing import Dict, List
+
 from bs4 import BeautifulSoup
-from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.product import Product
-from app.schemas.product import ProductCreate
-from app.schemas.product_image import ProductImageCreate
-from app.utils.text_utils import generate_slug, clean_text
-from app.crud.product import create_or_update_product
 from app.scrapers.base_scraper import BaseScraper
+from app.utils.text_utils import generate_slug, clean_text
 
 logger = logging.getLogger("intecron_scraper")
+
+_SERIES_URL_RE = re.compile(r"/catalog/intekron/([a-z0-9_]+)/?$")
+_VARIANT_URL_RE = re.compile(r"/catalog/intekron/[a-z0-9_]+/([a-z0-9_]+)/?$")
+
+# Attributes that are shop flags on the donor side, useless as product specs
+_SKIP_SPEC_KEYS = ("Новинка", "Акция", "Распродажа")
+
+
+def clean_catalog_name(raw: str) -> str:
+    name = raw or ""
+    name = re.sub(r"входн(ые|ая)\s+двер(и|ь)", "", name, flags=re.IGNORECASE)
+    name = re.sub(r"интекрон", "", name, flags=re.IGNORECASE)
+    name = re.sub(r"\s+", " ", name).strip(" -—.,«»\"'")
+    return f"Интекрон {name}".strip() if name else "Интекрон"
+
 
 class IntecronScraper(BaseScraper):
     def __init__(self):
@@ -23,585 +44,161 @@ class IntecronScraper(BaseScraper):
             brand_name="Интекрон",
             brand_slug="intecron",
             base_url="https://intecron-msk.ru",
-            logger_name="intecron_scraper"
+            logger_name="intecron_scraper",
         )
-        
-        # Специфичные паттерны для исключения изображений
-        self.image_exclude_patterns = [
-            "logo", "brand", "header", "footer", "banner", "menu", "icon", "button", 
-            "small", "mini", "thumb", "iblock", "bitrix", "templates", "intecron", 
-            "ico", "svg", "favicon", "min", "ywkciutsl8t3v8b1kv1rw2zlb5s02xqy", 
-            "qakcfj3fwhgp68nn1brewvwaxysuarfp"  # Конкретные заглушки Intecron
-        ]
-        
-    def is_valid_image_url(self, img_src: str) -> bool:
-        """
-        Проверяет, является ли URL валидным изображением продукта
-        """
-        if not img_src:
-            return False
-            
-        # Интерон часто использует URL типа /upload/iblock/...
-        if '/upload/iblock/' in img_src and any(ext in img_src.lower() for ext in ['.jpg', '.jpeg', '.png', '.webp']):
-            return True
-            
-        # Общие проверки для других форматов URL
-        if not any(pattern in img_src.lower() for pattern in self.image_exclude_patterns):
-            if (len(img_src) > 20 and 
-            ('.jpg' in img_src.lower() or '.jpeg' in img_src.lower() or 
-                '.png' in img_src.lower() or '.webp' in img_src.lower())):
-                return True
-        
-        return False
 
-    def add_image_url_if_valid(self, image_urls: List[str], raw_url: str) -> bool:
-        """
-        Добавляет URL изображения в список, если он валиден
-        Возвращает True, если изображение было добавлено
-        """
-        if not raw_url:
-            return False
+    # ── Series discovery ─────────────────────────────────────────────────
 
-        # Проверяем, является ли URL абсолютным
-        full_url = raw_url
-        if not raw_url.startswith('http'):
-            # Удаляем начальный слеш, если он есть
-            clean_url = raw_url.lstrip('/')
-            full_url = f"{self.base_url}/{clean_url}"
+    def discover_catalogs(self, main_url: str) -> List[Dict[str, str]]:
+        html = self.get_html(f"{self.base_url}/catalog/intekron/")
+        if not html:
+            return []
+        soup = BeautifulSoup(html, "html.parser")
 
-        # Проверяем валидность изображения
-        if not self.is_valid_image_url(full_url):
-            return False
-
-        # Проверяем дубликаты
-        if full_url in image_urls:
-            return False
-
-        # Добавляем URL в список
-        image_urls.append(full_url)
-        self.logger.debug(f"Добавлено изображение: {full_url}")
-        return True
-    
-    async def find_product_links(self, soup: BeautifulSoup) -> List[str]:
-        """
-        Находит все ссылки на товары на странице каталога
-        """
-        product_links = []
-        
-        # Ищем ссылки в разных типах элементов
-        link_selectors = [
-            "a.btn-wht",
-            "a.btn",
-            "a.product-link",
-            "a.detail-link",
-            "a[href*='/catalog/'][href*='detail']",
-            ".pr-bl a[href]",
-            ".catalog-item a[href]",
-            ".product-item a[href]"
-        ]
-        
-        for selector in link_selectors:
-            for a in soup.select(selector):
-                href = a.get('href')
-                if href and ('/catalog/' in href or '/product/' in href):
-                    # Исключаем категории и другие нетоварные ссылки
-                    if href.count('/') > 2 and not href.endswith('/'):
-                        product_links.append(href)
-        
-        # Если не нашли ссылки с предыдущими селекторами, ищем по контексту
-        if not product_links:
-            # Ищем ссылки с кнопками "Подробнее", "В корзину" и т.д.
-            for a in soup.find_all('a', href=True):
-                href = a.get('href')
-                text = a.get_text().lower()
-                if (href and ('/catalog/' in href or '/product/' in href) and 
-                    ('подробнее' in text or 'корзину' in text or 'detail' in href or 'product' in href)):
-                    product_links.append(href)
-        
-        # Удаляем дубликаты, сохраняя порядок
-        unique_links = []
+        catalogs: List[Dict[str, str]] = []
         seen = set()
-        for link in product_links:
-            if link not in seen:
-                seen.add(link)
-                unique_links.append(link)
-        
-        self.logger.info(f"Найдено {len(unique_links)} уникальных ссылок на товары")
-        return unique_links
-    
-    async def process_product_page(self, product_url: str, catalog_name: str, brand_id: int, catalog_id: int = None) -> Optional[ProductCreate]:
-        """
-        Обрабатывает страницу товара и создает объект ProductCreate
-        """
-        # Формируем полный URL
-        product_url = self.normalize_url(product_url)
-        
-        self.logger.info(f"Обработка товара по URL: {product_url}")
-        
-        # Проверяем, что catalog_id не None
-        if catalog_id is None:
-            self.logger.error(f"catalog_id не может быть None для товара: {product_url}")
-            return None
-        
-        # Получаем HTML с поддержкой ленивой загрузки изображений
-        html_content = self.get_html_content(product_url)
-        if not html_content:
-            self.logger.warning(f"Не удалось получить HTML-страницу товара: {product_url}")
-            return None
-        
-        soup = BeautifulSoup(html_content, 'html.parser')
-        
-        # Извлекаем название товара
-        name_selectors = ["h1", ".page-title", ".product-item-title", ".h4", ".name", ".title"]
-        name = None
-        for selector in name_selectors:
-            name_elem = soup.select_one(selector)
-            if name_elem and name_elem.text.strip():
-                name = name_elem.text.strip()
-                break
-        
-        if not name:
-            self.logger.warning(f"Не удалось найти название товара: {product_url}")
-            return None
-        
-        # Извлекаем цену
-        price = 0
-        price_selectors = [".price", ".product-item-price-current", ".catalog-price", "[class*='price']"]
-        for selector in price_selectors:
-            price_elems = soup.select(selector)
-            for price_elem in price_elems:
-                price_text = price_elem.text.strip()
-                extracted_price = self.extract_price_from_text(price_text)
-                if extracted_price > price:
-                    price = extracted_price
-        
-        # Извлекаем описание
-        description_parts = []
-        description_selectors = [
-            ".product-item-detail-tab-content", 
-            ".product-item-detail-properties",
-            ".detail_text",
-            ".product-description",
-            ".desc",
-            ".details"
-        ]
-        
-        for selector in description_selectors:
-            desc_elems = soup.select(selector)
-            for elem in desc_elems:
-                description_parts.append(clean_text(elem.get_text()))
-        
-        # Если описание не найдено, создаем базовое описание
-        if not description_parts:
-            description = f"Дверь {name} от производителя Intecron. Качественная металлическая дверь с надежной защитой."
-        else:
-            description = " ".join(description_parts)
-        
-        # Извлекаем характеристики
-        characteristics = {}
-        specs_selectors = [
-            ".product-item-detail-properties tr",
-            ".properties tr",
-            ".specs tr",
-            ".characteristics tr",
-            "table tr"
-        ]
-        
-        for selector in specs_selectors:
-            specs = soup.select(selector)
-            for spec in specs:
-                cells = spec.find_all(['td', 'th'])
-                if len(cells) >= 2:
-                    key = clean_text(cells[0].get_text())
-                    value = clean_text(cells[1].get_text())
-                    if key and value and len(key) < 100:
-                        characteristics[key] = value
-        
-        # Получаем изображения
-        image_urls = self.extract_product_images(soup, product_url)
-        
-        if not image_urls:
-            self.logger.warning(f"Не найдено ни одного изображения для товара: {name} ({product_url})")
-            # Добавляем заглушку-изображение, если не найдено ни одного
-            image_urls = ["https://intecron-msk.ru/local/templates/intecron_new/img/no-photo.jpg"]
-        
-        # Создаем объекты для изображений
-        images = [ProductImageCreate(url=img, is_main=(i == 0)) for i, img in enumerate(image_urls)]
-        
-        # Генерируем slug
-        product_slug = generate_slug(name)
-        
-        # Создаем мета-описание
-        meta_description = self.create_meta_description(description, characteristics)
-        
-        # Создаем продукт - НЕ передаем catalog_name в ProductCreate
-        product = ProductCreate(
-            name=name,
-            price=price,
-            description=description,
-            catalog_id=catalog_id,  # Только catalog_id
-            # Убираем catalog_name, он не нужен для модели Product
-            images=images,
-            image=image_urls[0] if image_urls else None,
-            in_stock=True,
-            characteristics=characteristics,
-            slug=product_slug,
-            meta_title=f"{name} - Intecron",
-            meta_description=meta_description[:500],
-            brand_id=brand_id
-        )
-        
-        self.logger.info(f"Успешно создан продукт: {name} с {len(images)} изображениями, catalog_id: {catalog_id}")
-        return product
-    
-    def extract_product_images(self, soup: BeautifulSoup, product_url: str) -> List[str]:
-        """
-        Извлекает только качественные изображения продукта
-        """
-        # Сначала собираем все возможные изображения
-        all_image_urls = []
-        valid_image_urls = []
-        
-        # Базовые селекторы для основных изображений
-        basic_selectors = [
-            ".swiper-slide a img",
-            ".magnific_popup_mobile img",
-            ".product-detail-slider-image img",
-            "[data-entity='image'] img"
-        ]
-        
-        # Сначала ищем по нашим основным селекторам
-        for selector in basic_selectors:
-            for img in soup.select(selector):
-                src = img.get('src')
-                if src:
-                    all_image_urls.append(self.normalize_url(src))
-        
-        # Ищем в data-атрибутах
-        for elem in soup.find_all(attrs={"data-entity": "images-container"}):
-            for img_elem in elem.find_all('img'):
-                src = img_elem.get('src')
-                if src:
-                    all_image_urls.append(self.normalize_url(src))
-        
-        # Извлекаем из data-value (специфично для Intecron)
-        for elem in soup.find_all(attrs={"data-value": True}):
-            data_value = elem.get('data-value')
-            if data_value and '"SRC":"' in data_value:
-                img_matches = re.findall(r'"SRC":"([^"]+)"', data_value)
-                for img_match in img_matches:
-                    img_url = img_match.replace('\/', '/')
-                    all_image_urls.append(self.normalize_url(img_url))
-        
-        # Фильтруем и добавляем только валидные
-        seen_urls = set()
-        for url in all_image_urls:
-            # Проверяем основные критерии для продуктовых изображений
-            if self.is_valid_product_image(url) and url not in seen_urls:
-                seen_urls.add(url)
-                valid_image_urls.append(url)
-                # Ограничиваем до 5 изображений
-                if len(valid_image_urls) >= 5:
-                    break
-        
-        # Если не нашли ни одного изображения, используем резервные методы
-        if not valid_image_urls:
-            # Последняя попытка - ищем все изображения с минимальной фильтрацией
-            for img in soup.find_all('img'):
-                src = img.get('src')
-                if src and '/upload/' in src and src.endswith(('.jpg', '.jpeg', '.png', '.webp')):
-                    url = self.normalize_url(src)
-                    if url not in seen_urls:
-                        seen_urls.add(url)
-                        valid_image_urls.append(url)
-                        # Берем только 2 изображения в резервном режиме
-                        if len(valid_image_urls) >= 2:
-                            break
-        
-        self.logger.info(f"Найдено {len(valid_image_urls)} валидных изображений для продукта {product_url}")
-        return valid_image_urls
+        for a in soup.select('a[href^="/catalog/intekron/"]'):
+            href = a.get("href") or ""
+            m = _SERIES_URL_RE.search(href)
+            if not m or m.group(1) in seen:
+                continue
+            seen.add(m.group(1))
+            url = self._abs_url(href)
+            catalogs.append({"url": url, "name": ""})  # name resolved in parse_catalog
+            self.logger.info("Discovered series: %s", url)
+        return catalogs
 
-    def is_valid_product_image(self, url: str) -> bool:
-        """
-        Проверяет, является ли URL качественным изображением продукта
-        """
-        if not url:
-            return False
-        
-        # Проверяем расширение
-        if not url.lower().endswith(('.jpg', '.jpeg', '.png', '.webp')):
-            return False
-        
-        if '/upload/' not in url and '/iblock/' not in url:
-            return False
-        
-        # Исключаем миниатюры и системные изображения
-        excluded_patterns = [
-            'logo', 'icon', 'button', 'banner', 'menu', 'min', 'small', 'thumb',
-            'background', 'bg_', 'header', 'footer'
-        ]
-        
-        for pattern in excluded_patterns:
-            if pattern in url.lower():
-                return False
-        
-        return True
-        
-    def normalize_url(self, url: str) -> str:
-        """
-        Преобразует относительный URL в абсолютный
-        """
-        if not url:
-            return ""
-            
-        # Если URL уже абсолютный, возвращаем как есть
-        if url.startswith(('http://', 'https://')):
-            return url
-            
-        # Удаляем начальный слеш, если он есть
-        clean_url = url.lstrip('/')
-        
-        # Формируем полный URL
-        full_url = f"{self.base_url}/{clean_url}"
-        
-        # Исправляем двойные слеши (кроме https://)
-        full_url = re.sub(r'([^:])//+', r'\1/', full_url)
-        
-        return full_url
-    
-    async def parse_catalog_page(self, catalog_url: str, db: AsyncSession, brand_id: int) -> List[ProductCreate]:
-        """
-        Парсит страницу каталога Intecron и возвращает список объектов ProductCreate
-        """
-        # Формируем полный URL
-        catalog_url = self.normalize_url(catalog_url)
-        
-        # Обновляем URL для корректного домена
-        if "intecron.ru" in catalog_url:
-            catalog_url = catalog_url.replace("intecron.ru", "intecron-msk.ru")
-        
-        self.logger.info(f"Парсинг каталога: {catalog_url}")
-        
-        # Получаем HTML страницы
-        html_content = self.get_html_content(catalog_url)
-        if not html_content:
-            self.logger.error(f"Не удалось получить HTML-страницу каталога: {catalog_url}")
+    # ── Series parsing ───────────────────────────────────────────────────
+
+    async def parse_catalog(
+        self,
+        catalog_url: str,
+        db: AsyncSession,
+        brand_id: int,
+        catalog_name: str = "",
+    ) -> List[Dict]:
+        catalog_url = self._abs_url(catalog_url)
+        m = _SERIES_URL_RE.search(catalog_url)
+        if not m:
+            self.logger.error("Not an Intecron series URL: %s", catalog_url)
             return []
-        
-        # Определяем имя и slug каталога из URL
-        catalog_parts = catalog_url.rstrip('/').split('/')
-        catalog_slug = catalog_parts[-1]
-        if not catalog_slug:
-            catalog_slug = catalog_parts[-2]
-        
-        # Формируем имя каталога
-        catalog_name_part = catalog_slug.replace('-', ' ').title()
-        catalog_name = f"Двери Intecron {catalog_name_part}"
-        
-        # Получаем или создаем каталог (правильный порядок аргументов: db, name, slug, brand_id)
-        catalog = await self.get_or_create_catalog(db, catalog_name, catalog_slug, brand_id)
-        
-        if not catalog:
-            self.logger.error(f"Не удалось создать каталог {catalog_name}")
+        catalog_slug = m.group(1)
+
+        html = self.get_html(catalog_url)
+        if not html:
             return []
-        
-        # Убедимся, что catalog.id не None
-        if catalog.id is None:
-            self.logger.error(f"catalog.id не может быть None для каталога {catalog_name}")
-            return []
-        
+        soup = BeautifulSoup(html, "html.parser")
+
+        if not catalog_name:
+            h1 = soup.select_one("h1")
+            catalog_name = clean_catalog_name(
+                h1.get_text(strip=True) if h1 else catalog_slug
+            )
+
+        catalog = await self.ensure_catalog(db, catalog_name, catalog_slug, brand_id)
         catalog_id = catalog.id
-        self.logger.info(f"Каталог получен с ID: {catalog_id}")
-        
-        soup = BeautifulSoup(html_content, 'html.parser')
-        
-        # Находим ссылки на товары
-        product_links = await self.find_product_links(soup)
-        
-        # Если нет ссылок на товары, возвращаем пустой список
-        if not product_links:
-            self.logger.warning(f"Не найдено ссылок на товары в каталоге: {catalog_url}")
-            return []
-        
-        # Обрабатываем каждую ссылку на товар
-        products = []
-        catalog_image_updated = False
-        
-        for link in product_links:
+
+        variant_urls: List[str] = []
+        prefix = f"/catalog/intekron/{catalog_slug}/"
+        for a in soup.select(f'a[href^="{prefix}"]'):
+            href = a.get("href") or ""
+            if _VARIANT_URL_RE.search(href):
+                variant_urls.append(self._abs_url(href))
+        variant_urls = list(dict.fromkeys(variant_urls))
+
+        self.logger.info("Series %s: %d variants", catalog_slug, len(variant_urls))
+
+        products: List[Dict] = []
+        first_image_url = None
+        for url in variant_urls:
             try:
-                # Передаем catalog_id в метод process_product_page
-                # Явно логируем передаваемые параметры
-                self.logger.info(f"Вызов process_product_page для {link} с catalog_id={catalog_id}")
-                product = await self.process_product_page(link, catalog_name, brand_id, catalog_id)
-                
-                if product:
-                    # Проверяем, что у продукта установлен catalog_id
-                    self.logger.info(f"Получен продукт с catalog_id: {product.catalog_id}")
-                    products.append(product)
-                    
-                    # Обновляем изображение каталога, если это первый продукт с изображениями
-                    if not catalog_image_updated and product.images and product.images[0].url:
-                        await self.update_catalog_image(db, catalog, product.images[0].url)
-                        catalog_image_updated = True
+                parsed = self._parse_product_page(url, catalog_id, brand_id)
+                if parsed:
+                    products.append(parsed)
+                    if not first_image_url and parsed["image_urls"]:
+                        candidate = parsed["image_urls"][0]
+                        if len(candidate) <= 255:
+                            first_image_url = candidate
             except Exception as e:
-                self.logger.error(f"Ошибка при обработке товара по ссылке {link}: {e}", exc_info=True)
-        
-        self.logger.info(f"Всего обработано {len(products)} товаров из каталога {catalog_url}")
+                self.logger.error("Failed to parse %s: %s", url, e, exc_info=True)
+
+        if first_image_url:
+            catalog.image = first_image_url
+            await db.flush()
+
+        self.logger.info("Parsed %d products from %s", len(products), catalog_url)
         return products
-    
-    async def parse_multiple_catalogs(self, catalog_urls: List[str], db: AsyncSession) -> int:
-        """
-        Парсит несколько каталогов и создает или обновляет продукты в базе данных
-        с автоматической категоризацией
-        """
-        self.logger.info(f"Запуск парсера для {len(catalog_urls)} каталогов")
-        total_products = 0
-        new_products = 0
-        updated_products = 0
-        
-        # Получаем или создаем бренд Intecron
-        brand_id = await self.ensure_brand_exists(db)
-        self.logger.info(f"Получен ID бренда Intecron: {brand_id}")
-        
-        # Обновляем существующие каталоги, чтобы привязать их к бренду
-        await self.update_catalogs_brand_id(db, brand_id)
-        
-        # 1. Получаем все активные категории (как в Лабиринте)
-        all_categories = await self.get_all_categories_from_db(db)
-        
-        if not all_categories:
-            self.logger.error("В базе данных нет активных категорий!")
-            return 0
-        
-        self.logger.info(f"Найдено {len(all_categories)} активных категорий в БД")
-        
-        # 2. Получаем обязательную категорию "Все двери" (как в Лабиринте)
-        default_category = await self.get_default_category(db)
-        
-        if not default_category:
-            self.logger.error("Не найдена категория 'Все двери' или аналогичная!")
-            return 0
-        
-        default_category_id = default_category.id
-        self.logger.info(f"Основная категория: '{default_category.name}' (ID: {default_category_id})")
-        self.logger.info(f"Бренд для всех продуктов: '{self.brand_name}' (ID: {brand_id})")
-        
-        # Собираем продукты для последующей классификации
-        products_to_classify = []
-        
-        for url in catalog_urls:
+
+    # ── Variant page parsing ─────────────────────────────────────────────
+
+    def _parse_product_page(
+        self,
+        product_url: str,
+        catalog_id: int,
+        brand_id: int,
+    ) -> Dict | None:
+        html = self.get_html(product_url)
+        if not html:
+            return None
+        soup = BeautifulSoup(html, "html.parser")
+
+        h1 = soup.select_one("h1")
+        if not h1:
+            return None
+        raw_name = h1.get_text(strip=True)
+        name = f"Входная дверь Интекрон {raw_name}"
+
+        price = 0
+        price_el = soup.select_one("#price_value")
+        if price_el and price_el.get("data-value"):
             try:
-                products = await self.parse_catalog_page(url, db, brand_id)
-                self.logger.info(f"Получено {len(products)} продуктов из каталога {url}")
-                
-                for product_in in products:
-                    try:
-                        # Проверка на существование продукта перед созданием нового
-                        result = await db.execute(
-                            select(Product).where(
-                                or_(
-                                    Product.slug == product_in.slug,
-                                    func.lower(Product.name) == product_in.name.lower()
-                                )
-                            )
-                        )
-                        existing_product = result.scalar_one_or_none()
-                        
-                        # Создаем или обновляем продукт
-                        created_product = await create_or_update_product(db, product_in)
-                        
-                        if created_product:
-                            # Собираем ВЕСЬ текст для анализа категорий (как в Лабиринте)
-                            analysis_text = self._prepare_product_text_for_analysis(product_in)
-                            
-                            # Добавляем в очередь для классификации
-                            products_to_classify.append({
-                                'product_id': created_product.id,
-                                'text': analysis_text,
-                                'name': product_in.name
-                            })
-                            
-                            # Увеличиваем счетчики
-                            total_products += 1
-                            if existing_product:
-                                updated_products += 1
-                            else:
-                                new_products += 1
-                                
-                            await db.flush()
-                        else:
-                            self.logger.warning(f"Не удалось создать/обновить продукт {product_in.name}")
-                    
-                    except Exception as e:
-                        # Если произошла ошибка при обработке конкретного товара, логируем и продолжаем
-                        self.logger.warning(f"[SCRAPER] Ошибка при обработке товара: {e}")
-                        # Делаем rollback сессии
-                        await db.rollback()
-            
-            except Exception as e:
-                self.logger.error(f"[SCRAPER] Ошибка при обработке каталога {url}: {e}", exc_info=True)
-                # Делаем rollback чтобы избежать накопления ошибок
-                await db.rollback()
+                price = int(float(price_el["data-value"]))
+            except (TypeError, ValueError):
+                price = 0
+        if not price and price_el:
+            price = self.extract_price(price_el.get_text(strip=True))
+        if not price:
+            self.logger.warning("No price at %s — skipping", product_url)
+            return None
 
-        # Делаем коммит всех созданных/обновленных продуктов перед дополнительной классификацией
-        try:
-            await db.commit()
-            self.logger.info(f"Успешно обработано {total_products} продуктов (новых: {new_products}, обновлено: {updated_products})")
-        except Exception as e:
-            self.logger.error(f"[SCRAPER] Ошибка при сохранении продуктов: {e}", exc_info=True)
-            await db.rollback()
-            return 0
+        attributes = self.extract_specs(soup)
+        image_urls = self._extract_images(soup)
 
-        # КЛАССИФИКАЦИЯ ПО КАТЕГОРИЯМ (как в Лабиринте)
-        if products_to_classify:
-            self.logger.info(f"Начинаем классификацию {len(products_to_classify)} продуктов")
-            
-            classified_count = 0
-            
-            for product_info in products_to_classify:
-                try:
-                    product_id = product_info['product_id']
-                    product_text = product_info['text']
-                    product_name = product_info['name']
-                    
-                    # Находим подходящие дополнительные категории
-                    additional_categories = await self.classify_product_to_categories(
-                        product_text, 
-                        all_categories,
-                        min_matches=1  # Минимум 1 совпадение
-                    )
-                    
-                    # Назначаем продукт в категории (обязательно в "Все двери" + дополнительные)
-                    await self.assign_product_to_all_categories(
-                        db,
-                        product_id,
-                        default_category_id,
-                        additional_categories
-                    )
-                    
-                    classified_count += 1
-                    
-                    # Логируем результат классификации
-                    additional_names = [cat['name'] for cat in additional_categories[:3]]  # Первые 3
-                    self.logger.debug(f"Продукт '{product_name}' -> Все двери + {additional_names}")
-                    
-                except Exception as e:
-                    self.logger.error(f"Ошибка при классификации продукта {product_info.get('name', 'Unknown')}: {e}")
-                    continue
-            
-            # Коммитим все изменения по категориям
-            try:
-                await db.commit()
-                self.logger.info(f"Успешно классифицировано {classified_count} продуктов")
-                
-                # Обновляем счетчики товаров в категориях
-                await self.update_category_counters(db)
-                
-            except Exception as e:
-                self.logger.error(f"Ошибка при сохранении классификации: {e}", exc_info=True)
-                await db.rollback()
+        return {
+            "name": name,
+            "slug": generate_slug(name),
+            "description": "",
+            "attributes": attributes,
+            "source_url": product_url,
+            "original_price": price,
+            "catalog_id": catalog_id,
+            "brand_id": brand_id,
+            "image_urls": image_urls,
+            "meta_title": name,
+            "meta_description": "",
+            "in_stock": True,
+        }
 
-        self.logger.info(f"ИТОГО: {total_products} товаров (новых: {new_products}, обновлено: {updated_products})")
-        return total_products
+    def extract_specs(self, soup: BeautifulSoup) -> dict:
+        specs = {}
+        for row in soup.select(".specific-tbl table tr"):
+            th = row.select_one("th")
+            td = row.select_one("td")
+            if not th or not td:
+                continue
+            key = clean_text(th.get_text()).rstrip(":")
+            val = clean_text(td.get_text())
+            if key and val and key not in _SKIP_SPEC_KEYS:
+                specs[key] = val
+        return specs
 
-    
+    def _extract_images(self, soup: BeautifulSoup) -> List[str]:
+        # The main photo is the first /upload/iblock image on the page;
+        # the rest are mostly "similar products" thumbnails.
+        for img in soup.select('img[src*="/upload/"]'):
+            src = img.get("src") or ""
+            if "/upload/iblock/" in src and src.lower().endswith(
+                (".jpg", ".jpeg", ".png", ".webp")
+            ):
+                return self.collect_image_urls([src])
+        return []
