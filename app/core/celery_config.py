@@ -20,4 +20,8 @@ celery_app.conf.beat_schedule = {
         "task": "app.worker.tasks.labirint_weekly_sync_task",
         "schedule": crontab(minute=7, hour=0, day_of_week="sunday"),
     },
+    "bunker-weekly-sync": {
+        "task": "app.worker.tasks.bunker_weekly_sync_task",
+        "schedule": crontab(minute=7, hour=1, day_of_week="sunday"),
+    },
 }

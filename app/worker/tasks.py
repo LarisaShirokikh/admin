@@ -448,6 +448,47 @@ def labirint_weekly_sync_task(self):
         asyncio.set_event_loop(None)
 
 
+@shared_task(bind=True, max_retries=2)
+def bunker_weekly_sync_task(self):
+    """Weekly donor sync для Бункера (bunkerdoors.ru), зеркало labirint_weekly_sync_task."""
+    logger.info("Bunker weekly: старт")
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        async def process():
+            from app.scrapers.bunker_doors import BunkerDoorsScraper
+            scraper = BunkerDoorsScraper()
+            catalogs = scraper.discover_catalogs("https://bunkerdoors.ru")
+            if not catalogs:
+                logger.error("Bunker weekly: каталоги не найдены, синк отменён")
+                return {"error": "no catalogs discovered"}
+
+            seen_slugs = {c["url"].rstrip("/").split("/")[-1] for c in catalogs}
+            task_engine, TaskSession = _create_task_session()
+            try:
+                async with TaskSession() as db:
+                    total = await scraper.sync_multiple_catalogs_with_names(catalogs, db)
+                    brand_id = await scraper.ensure_brand(db)
+                    gone = await scraper.deactivate_missing_catalogs(db, brand_id, seen_slugs)
+                    await scraper.update_category_counters(db)
+                    await db.commit()
+                    return {"catalogs": len(catalogs), "products": total, "deactivated_by_catalog": gone}
+            finally:
+                await task_engine.dispose()
+
+        result = loop.run_until_complete(process())
+        logger.info("Bunker weekly: завершено %s", result)
+        return {"status": "success", **(result or {})}
+    except Exception as e:
+        logger.error("Bunker weekly: ошибка: %s", e, exc_info=True)
+        if self.request.retries >= self.max_retries:
+            raise
+        self.retry(exc=e, countdown=600)
+    finally:
+        loop.close()
+        asyncio.set_event_loop(None)
+
+
 @shared_task(bind=True)
 def reclassify_all_products_task(self):
     """One-off: re-assign categories for every active product using the rule engine."""
