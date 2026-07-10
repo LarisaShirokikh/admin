@@ -450,8 +450,8 @@ def labirint_weekly_sync_task(self):
 
 @shared_task(bind=True, max_retries=2)
 def bunker_weekly_sync_task(self):
-    """Weekly donor sync для Бункера (bunkerdoors.ru), зеркало labirint_weekly_sync_task."""
-    logger.info("Bunker weekly: старт")
+    """Weekly donor sync for Bunker (bunkerdoors.ru), mirrors labirint_weekly_sync_task."""
+    logger.info("Bunker weekly: start")
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     try:
@@ -460,7 +460,7 @@ def bunker_weekly_sync_task(self):
             scraper = BunkerDoorsScraper()
             catalogs = scraper.discover_catalogs("https://bunkerdoors.ru")
             if not catalogs:
-                logger.error("Bunker weekly: каталоги не найдены, синк отменён")
+                logger.error("Bunker weekly: no catalogs discovered, sync aborted")
                 return {"error": "no catalogs discovered"}
 
             seen_slugs = {c["url"].rstrip("/").split("/")[-1] for c in catalogs}
@@ -477,10 +477,10 @@ def bunker_weekly_sync_task(self):
                 await task_engine.dispose()
 
         result = loop.run_until_complete(process())
-        logger.info("Bunker weekly: завершено %s", result)
+        logger.info("Bunker weekly: done %s", result)
         return {"status": "success", **(result or {})}
     except Exception as e:
-        logger.error("Bunker weekly: ошибка: %s", e, exc_info=True)
+        logger.error("Bunker weekly: error: %s", e, exc_info=True)
         if self.request.retries >= self.max_retries:
             raise
         self.retry(exc=e, countdown=600)

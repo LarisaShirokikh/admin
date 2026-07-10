@@ -1,14 +1,14 @@
-"""Скрапер официального сайта Бункера bunkerdoors.ru.
+"""Scraper for the official Bunker site bunkerdoors.ru.
 
-Переписан 2026-07-10 под новую архитектуру BaseScraper (диф-синк, content_hash,
-category_rules) по образцу labirint.py. Сайт донора на том же движке, что и
-labirintdoors.ru (шаблоны «*-01»), поэтому селекторы совпадают с Лабиринтом.
+Rewritten 2026-07-10 for the current BaseScraper architecture (diff-sync,
+content_hash, category_rules), modeled after labirint.py. The donor runs the
+same engine as labirintdoors.ru ("*-01" templates), so most selectors match.
 
-Структура донора:
-  /prod/<серия>/<bn-NN>   — страница модели (серии: bunker-base/hit/prime/termo)
-  /<bn-NN-отделка-цвет>   — карточка конечного товара-варианта (в корне сайта)
-Каталог магазина = модель BN-NN, товар = вариант. Полный список вариантов
-модели берём из sitemap.xml по префиксу slug (на странице модели lazy-пагинация).
+Donor structure:
+  /prod/<series>/<bn-NN>   — model page (series: bunker-base/hit/prime/termo)
+  /<bn-NN-finish-color>    — final product variant page (site root)
+Shop catalog = model BN-NN, product = variant. The full variant list per model
+comes from sitemap.xml by slug prefix (model pages use lazy pagination).
 """
 import json
 import logging
@@ -26,7 +26,7 @@ logger = logging.getLogger("bunker_scraper")
 _MODEL_URL_RE = re.compile(r"/prod/([a-z0-9-]+)/(bn-\d+)/?$")
 _VARIANT_SLUG_RE = re.compile(r"^(?:vhodnaya-dver-)?(bn-\d+)")
 
-# Серии донора → человекочитаемое имя (для названия каталога)
+# Donor series slug → human-readable name (used in catalog titles)
 _SERIES_NAMES = {
     "bunker-base": "Базовая",
     "bunker-hit": "Хит",
@@ -34,9 +34,12 @@ _SERIES_NAMES = {
     "bunker-termo": "Термо",
 }
 
+# catalog.image column is varchar(255); donor has long percent-encoded URLs
+_MAX_IMAGE_URL_LEN = 255
+
 
 def model_catalog_name(model_slug: str, series_slug: str = "") -> str:
-    """bn-03 + bunker-hit → «Бункер БН-03 Хит»."""
+    """bn-03 + bunker-hit → 'Бункер БН-03 Хит'."""
     model = model_slug.upper().replace("BN-", "БН-")
     series = _SERIES_NAMES.get(series_slug, "")
     return f"Бункер {model} {series}".strip()
@@ -52,15 +55,15 @@ class BunkerDoorsScraper(BaseScraper):
         )
         self._sitemap_slugs: Optional[List[str]] = None
 
-    # ── Sitemap донора ───────────────────────────────────────────────────
+    # ── Donor sitemap ────────────────────────────────────────────────────
 
     def _get_sitemap_slugs(self) -> List[str]:
-        """Кеш всех корневых slug'ов из sitemap.xml (товары-варианты)."""
+        """Cached root-level slugs from sitemap.xml (product variants)."""
         if self._sitemap_slugs is not None:
             return self._sitemap_slugs
         xml = self.get_html(f"{self.base_url}/sitemap.xml") or ""
         slugs: List[str] = []
-        # Только <loc> — regex вместо XML-парсера (XXE-безопасно)
+        # Only <loc> values are needed — regex instead of an XML parser (XXE-safe)
         for url in re.findall(r"<loc>\s*([^<\s]+)\s*</loc>", xml):
             path = url.replace(self.base_url, "").strip("/")
             if "/" in path or not path:
@@ -68,17 +71,16 @@ class BunkerDoorsScraper(BaseScraper):
             if _VARIANT_SLUG_RE.match(path):
                 slugs.append(path)
         self._sitemap_slugs = slugs
-        self.logger.info("В sitemap донора %d товаров-вариантов", len(slugs))
+        self.logger.info("Donor sitemap has %d product variants", len(slugs))
         return slugs
 
-    # ── Обнаружение каталогов (моделей) ──────────────────────────────────
+    # ── Catalog (model) discovery ────────────────────────────────────────
 
     def discover_catalogs(self, main_url: str) -> List[Dict[str, str]]:
-        """Модели выводим из товаров-вариантов sitemap (у части моделей нет
-        своей страницы /prod/... в sitemap — например BN-02, BN-12…BN-15)."""
+        """Models are derived from variant slugs: some models (BN-02, BN-12..15)
+        have no /prod/... page in the sitemap at all."""
         xml = self.get_html(f"{self.base_url}/sitemap.xml") or ""
 
-        # серия модели, если страница модели есть в sitemap
         series_by_model: Dict[str, str] = {}
         model_urls: Dict[str, str] = {}
         for url in re.findall(r"<loc>\s*([^<\s]+)\s*</loc>", xml):
@@ -97,13 +99,13 @@ class BunkerDoorsScraper(BaseScraper):
         for model_slug in sorted(models):
             series_slug = series_by_model.get(model_slug, "")
             name = model_catalog_name(model_slug, series_slug)
-            # псевдо-URL для моделей без страницы: parse_catalog берёт slug из хвоста
+            # pseudo-URL for pageless models: parse_catalog reads the slug from the tail
             url = model_urls.get(model_slug, f"{self.base_url}/prod/x/{model_slug}")
             catalogs.append({"url": url, "name": name})
-            self.logger.info("Найдена модель: %s → %s", name, url)
+            self.logger.info("Discovered model: %s → %s", name, url)
         return catalogs
 
-    # ── Парсинг каталога (модели) ────────────────────────────────────────
+    # ── Catalog (model) parsing ──────────────────────────────────────────
 
     async def parse_catalog(
         self,
@@ -115,10 +117,10 @@ class BunkerDoorsScraper(BaseScraper):
         catalog_url = self._abs_url(catalog_url)
         tail = re.search(r"(bn-\d+)/?$", catalog_url)
         if not tail:
-            self.logger.error("Не похоже на URL модели Бункера: %s", catalog_url)
+            self.logger.error("Not a Bunker model URL: %s", catalog_url)
             return []
         model_slug = tail.group(1)
-        catalog_slug = model_slug  # slug каталога = slug модели (bn-03)
+        catalog_slug = model_slug
 
         if not catalog_name:
             m = _MODEL_URL_RE.search(catalog_url)
@@ -127,8 +129,8 @@ class BunkerDoorsScraper(BaseScraper):
         catalog = await self.ensure_catalog(db, catalog_name, catalog_slug, brand_id)
         catalog_id = catalog.id
 
-        # Варианты модели: страница модели (может быть обрезана lazy-пагинацией)
-        # + sitemap по префиксу slug — объединяем для полноты.
+        # Variants: model page listing (may be cut by lazy pagination)
+        # merged with sitemap slugs by model prefix for completeness.
         variant_slugs: List[str] = []
         html = self.get_html(catalog_url)
         if html:
@@ -143,7 +145,7 @@ class BunkerDoorsScraper(BaseScraper):
                 variant_slugs.append(slug)
         variant_slugs = list(dict.fromkeys(variant_slugs))
 
-        self.logger.info("Модель %s: %d вариантов", model_slug, len(variant_slugs))
+        self.logger.info("Model %s: %d variants", model_slug, len(variant_slugs))
 
         products: List[Dict] = []
         first_image_url = None
@@ -155,18 +157,20 @@ class BunkerDoorsScraper(BaseScraper):
                 if parsed:
                     products.append(parsed)
                     if not first_image_url and parsed["image_urls"]:
-                        first_image_url = parsed["image_urls"][0]
+                        candidate = parsed["image_urls"][0]
+                        if len(candidate) <= _MAX_IMAGE_URL_LEN:
+                            first_image_url = candidate
             except Exception as e:
-                self.logger.error("Ошибка парсинга %s: %s", slug, e, exc_info=True)
+                self.logger.error("Failed to parse %s: %s", slug, e, exc_info=True)
 
         if first_image_url:
             catalog.image = first_image_url
             await db.flush()
 
-        self.logger.info("Распарсено %d товаров из %s", len(products), catalog_url)
+        self.logger.info("Parsed %d products from %s", len(products), catalog_url)
         return products
 
-    # ── Парсинг карточки варианта ────────────────────────────────────────
+    # ── Variant page parsing ─────────────────────────────────────────────
 
     def _parse_product_page(
         self,
@@ -180,7 +184,7 @@ class BunkerDoorsScraper(BaseScraper):
 
         soup = BeautifulSoup(html, "html.parser")
 
-        # Основной источник — JSON-LD Product, который донор кладёт в <head>
+        # Primary source is the JSON-LD Product block the donor puts in <head>
         ld = self._extract_json_ld(soup)
         name = (ld.get("name") or "").strip()
         if not name:
@@ -200,7 +204,7 @@ class BunkerDoorsScraper(BaseScraper):
             price_el = soup.select_one(".product-01__price")
             price = self.extract_price(price_el.get_text(strip=True)) if price_el else 0
         if not price:
-            self.logger.warning("Нет цены у %s — пропуск", product_url)
+            self.logger.warning("No price at %s — skipping", product_url)
             return None
 
         image_urls = self._extract_images(soup, ld)
@@ -247,15 +251,15 @@ class BunkerDoorsScraper(BaseScraper):
     def _extract_images(self, soup: BeautifulSoup, ld: dict) -> List[str]:
         raw_urls: List[str] = []
 
-        # Основной источник — JSON-LD (оригиналы). Селекторы галереи не используем:
-        # у донора Angular-галерея, а data-bc-lazy теги включают баннеры/логотипы.
+        # JSON-LD carries the original-size image; gallery selectors are not
+        # used on purpose: the donor gallery is Angular-rendered and lazy-load
+        # tags there include banners and logos.
         ld_images = ld.get("image")
         if isinstance(ld_images, list):
             raw_urls.extend(u for u in ld_images if isinstance(u, str))
         elif isinstance(ld_images, str):
             raw_urls.append(ld_images)
 
-        # Фолбэк: og:image, если JSON-LD пуст
         if not raw_urls:
             og = soup.select_one('meta[property="og:image"]')
             if og and og.get("content"):
