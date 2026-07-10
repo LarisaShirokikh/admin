@@ -232,6 +232,9 @@ class BaseScraper:
             if catalog.brand_id != brand_id:
                 catalog.brand_id = brand_id
                 changed = True
+            if catalog.is_active is not True:
+                catalog.is_active = True
+                changed = True
             if changed:
                 await db.flush()
             return catalog

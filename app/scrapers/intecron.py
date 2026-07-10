@@ -13,7 +13,7 @@ first /upload/iblock image as the photo.
 """
 import logging
 import re
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 from bs4 import BeautifulSoup
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -28,6 +28,21 @@ _VARIANT_URL_RE = re.compile(r"/catalog/intekron/[a-z0-9_]+/([a-z0-9_]+)/?$")
 
 # Attributes that are shop flags on the donor side, useless as product specs
 _SKIP_SPEC_KEYS = ("Новинка", "Акция", "Распродажа")
+
+# The donor splits some series into micro-categories per finish
+# (profit_black_dub_turin, sitsiliya_remix_granzh, …) with 1-2 products each.
+# Group them into one proper catalog per series.
+_SERIES_GROUPS = {
+    "profit_black": "Профит Блэк",
+    "sitsiliya_remix": "Сицилия Ремикс",
+}
+
+
+def _group_for(series_slug: str) -> Optional[str]:
+    for prefix in _SERIES_GROUPS:
+        if series_slug == prefix or series_slug.startswith(prefix + "_"):
+            return prefix
+    return None
 
 
 def clean_catalog_name(raw: str) -> str:
@@ -60,13 +75,37 @@ class IntecronScraper(BaseScraper):
         for a in soup.select('a[href^="/catalog/intekron/"]'):
             href = a.get("href") or ""
             m = _SERIES_URL_RE.search(href)
-            if not m or m.group(1) in seen:
+            if not m:
                 continue
-            seen.add(m.group(1))
-            url = self._abs_url(href)
-            catalogs.append({"url": url, "name": ""})  # name resolved in parse_catalog
+            series_slug = m.group(1)
+            group = _group_for(series_slug)
+            if group:
+                # grouped micro-series get one pseudo-URL per group;
+                # parse_catalog expands it to all member series
+                key, url, name = (
+                    group,
+                    f"{self.base_url}/catalog/intekron/{group}/",
+                    f"Интекрон {_SERIES_GROUPS[group]}",
+                )
+            else:
+                key, url, name = series_slug, self._abs_url(href), ""
+            if key in seen:
+                continue
+            seen.add(key)
+            catalogs.append({"url": url, "name": name})
             self.logger.info("Discovered series: %s", url)
         return catalogs
+
+    def _member_series_urls(self, group: str) -> List[str]:
+        """All real series URLs belonging to a grouped micro-series."""
+        html = self.get_html(f"{self.base_url}/catalog/intekron/") or ""
+        soup = BeautifulSoup(html, "html.parser")
+        urls: List[str] = []
+        for a in soup.select('a[href^="/catalog/intekron/"]'):
+            m = _SERIES_URL_RE.search(a.get("href") or "")
+            if m and _group_for(m.group(1)) == group:
+                urls.append(self._abs_url(a["href"]))
+        return list(dict.fromkeys(urls))
 
     # ── Series parsing ───────────────────────────────────────────────────
 
@@ -84,27 +123,47 @@ class IntecronScraper(BaseScraper):
             return []
         catalog_slug = m.group(1)
 
-        html = self.get_html(catalog_url)
-        if not html:
+        group = _group_for(catalog_slug)
+        if group:
+            catalog_slug = group
+            catalog_name = catalog_name or f"Интекрон {_SERIES_GROUPS[group]}"
+            series_urls = self._member_series_urls(group)
+        else:
+            series_urls = [catalog_url]
+
+        variant_urls: List[str] = []
+        first_soup = None
+        for series_url in series_urls:
+            html = self.get_html(series_url)
+            if not html:
+                continue
+            soup = BeautifulSoup(html, "html.parser")
+            if first_soup is None:
+                first_soup = soup
+            sm = _SERIES_URL_RE.search(series_url)
+            prefix = f"/catalog/intekron/{sm.group(1)}/"
+            for a in soup.select(f'a[href^="{prefix}"]'):
+                href = a.get("href") or ""
+                if _VARIANT_URL_RE.search(href):
+                    variant_urls.append(self._abs_url(href))
+        variant_urls = list(dict.fromkeys(variant_urls))
+
+        if first_soup is None:
             return []
-        soup = BeautifulSoup(html, "html.parser")
 
         if not catalog_name:
-            h1 = soup.select_one("h1")
-            catalog_name = clean_catalog_name(
-                h1.get_text(strip=True) if h1 else catalog_slug
-            )
+            # Series pages have no h1: the name lives in "h2.h-2"
+            # («СТАЛЬНАЯ ДВЕРЬ Гектор») or the last breadcrumb item.
+            h2 = first_soup.select_one("h2.h-2")
+            raw = h2.get_text(" ", strip=True) if h2 else ""
+            raw = re.sub(r"стальн(ая|ые)\s+двер(ь|и)", "", raw, flags=re.IGNORECASE)
+            if not raw.strip():
+                crumb = first_soup.select(".breadcrumb li span")
+                raw = crumb[-1].get_text(strip=True).title() if crumb else catalog_slug
+            catalog_name = clean_catalog_name(raw)
 
         catalog = await self.ensure_catalog(db, catalog_name, catalog_slug, brand_id)
         catalog_id = catalog.id
-
-        variant_urls: List[str] = []
-        prefix = f"/catalog/intekron/{catalog_slug}/"
-        for a in soup.select(f'a[href^="{prefix}"]'):
-            href = a.get("href") or ""
-            if _VARIANT_URL_RE.search(href):
-                variant_urls.append(self._abs_url(href))
-        variant_urls = list(dict.fromkeys(variant_urls))
 
         self.logger.info("Series %s: %d variants", catalog_slug, len(variant_urls))
 
