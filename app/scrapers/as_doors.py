@@ -26,7 +26,9 @@ from app.utils.text_utils import generate_slug, clean_text
 logger = logging.getLogger("as_doors_scraper")
 
 _ONSTOCK_URL = "https://as-doors.ru/onstock/"
-_CATALOG_SLUG = "as-doors-onstock"
+# Must equal the URL tail: deactivate_missing_catalogs compares catalog slugs
+# against discover_catalogs URL tails.
+_CATALOG_SLUG = "onstock"
 _CATALOG_NAME = "АС Двери (в наличии)"
 
 
