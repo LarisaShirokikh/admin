@@ -207,10 +207,14 @@ class BaseScraper:
         )
         brand = result.scalar_one_or_none()
         if not brand:
-            brand = Brand(name=self.brand_name, slug=self.brand_slug)
+            brand = Brand(name=self.brand_name, slug=self.brand_slug, is_active=True)
             db.add(brand)
             await db.flush()
             self.logger.info("Создан бренд: %s (ID: %d)", self.brand_name, brand.id)
+        elif brand.is_active is not True:
+            # legacy rows may be inactive; a synced brand must be visible
+            brand.is_active = True
+            await db.flush()
         return brand.id
 
     async def ensure_catalog(
